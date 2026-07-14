@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <model name="x500_d455">
+
+    <!-- Include the base X500 drone model - LOCAL vendored copy in
+         models/x500/ (2026-07-11, root-cause fix). Previously this pulled
+         from Gazebo Fuel over the network on every launch: even with a
+         local cache, gz-fuel-tools re-resolves the model AND all 16 of its
+         mesh/texture URIs (each a separate https://fuel.gazebosim.org/...
+         reference) at world-load time, a variable-latency network step
+         with no timeout guard. This raced the fixed wall-clock startup
+         schedule below (bridge/slam/planners on TimerAction delays that
+         assume Gazebo is ready by a fixed offset): on a slow/flaky
+         resolution, the model - which carries the MulticopterVelocityControl
+         plugin - could still be loading when cmd_vel commands started
+         flowing, producing "RViz opens, drone never moves" (~1 in 3-4
+         launches). Same fix already applied to the D455 camera model for
+         the same reason (see models/d455/ comment) - x500 just hadn't been
+         migrated yet. -->
+    <include>
+      <uri>model://x500</uri>
+      <name>x500</name>
+      <!-- We position the drone at the origin -->
+      <pose>0 0 0.25 0 0 0</pose>
+
+      <!-- Inject the MulticopterVelocityControl plugin inside the included model -->
+      <!-- This allows the plugin to find 'base_link' and the rotor joints locally -->
+      <plugin
+        filename="gz-sim-multicopter-control-system"
+        name="gz::sim::systems::MulticopterVelocityControl">
+        <robotNamespace>x500</robotNamespace>
+        <commandSubTopic>cmd_vel</commandSubTopic>
+        <comLinkName>base_link</comLinkName>
+        <enableActuatorVelocity>true</enableActuatorVelocity>
+        <velocityGain>4 4 15</velocityGain>
+        <attitudeGain>1 1 0.8</attitudeGain>
+        <angularRateGain>0.3 0.3 0.3</angularRateGain>
+        <rotorConfiguration>
+          <rotor>
+            <jointName>rotor_0_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_1_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_2_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_3_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+        </rotorConfiguration>
+      </plugin>
+    </include>
+
+    <!-- Include the Intel RealSense D455 model - from the LOCAL copy in the
+         project's own models/d455/ directory (not Fuel's shared cache - D455
+         isn't in Fuel anyway, and the "our own trackable copy" philosophy adopted
+         for d435 continues in the same way). Difference from D435:
+         D455 contains an EMBEDDED IMU in the real hardware, so this model
+         has ITS OWN imu_sensor + Imu system plugin (see models/d455/
+         model.sdf) - it no longer relies on x500's own IMU (2026-07-10,
+         user request: switch to D455 + remove external IMU dependency). -->
+    <include>
+      <uri>model://d455</uri>
+      <name>d455</name>
+      <!-- Position it at the center of the drone, raised further (z=0.40) to be completely above the body -->
+      <pose>0 0 0.40 0 0 0</pose>
+    </include>
+
+    <!-- Create a fixed joint to attach the camera securely to the drone frame -->
+    <joint name="camera_joint" type="fixed">
+      <parent>x500::base_link</parent>
+      <child>d455::link</child>
+    </joint>
+
+  </model>
+</sdf>

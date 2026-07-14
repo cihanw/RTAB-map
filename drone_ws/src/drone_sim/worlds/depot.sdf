@@ -1,0 +1,90 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="depot">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 20 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Depot model - ORIGINAL Fuel source (2026-07-09, user request:
+         revert world to its initial state). There is no separate downloadable
+         "depot.sdf" world in Fuel (checked: OpenRobotics/worlds/Depot 404,
+         not in gz-sim's 125 sample worlds either) - there is only the depot MODEL,
+         this world is just a minimal skeleton wrapping it. In Phase 1 (loop_closure_
+         roadmap.md) we removed BOXSET_visual (repeated box stacks) and made
+         a project-local copy (models/depot/), and we added dozens of extra
+         objects/photo panels - all of these were removed, and we reverted back
+         to the original/unmodified Fuel model (including BOXSET). -->
+    <include>
+      <uri>model://depot</uri>
+      <name>depot</name>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+
+    <!-- Include our custom drone model directly in the world -->
+    <include>
+      <uri>model://x500_d455</uri>
+      <name>drone</name>
+      <pose>0 0 0.5 0 0 0</pose>
+    </include>
+
+    <!-- Highly optimized feature point rich models for GFTT/ORB -->
+    <include>
+      <uri>model://picture_panel_cityscape</uri>
+      <name>panel_1</name>
+      <!-- x=12, y=6, z=1.0, rotated to face origin -->
+      <pose>-14 6.5 1.0 0 0 -2.67</pose>
+    </include>
+
+    <!-- Rescue Randy dummy acting as a statue - LOCAL vendored copy
+         (models/rescue_randy/), see lessons.md Lesson 5: remote Fuel
+         includes are a launch-time network-race risk even when cached. -->
+    <include>
+      <uri>model://rescue_randy</uri>
+      <name>statue</name>
+      <!-- x=12, y=-6, z=0.0, rotated to face origin -->
+      <pose>-12 -6 0.0 0 0 2.67</pose>
+    </include>
+
+    <!-- LOCAL vendored copy (models/standing_person/), same reason. -->
+    <include>
+      <uri>model://standing_person</uri>
+      <name>statue_2</name>
+      <!-- x=3, y=-6.5, z=0.0, rotated to face origin -->
+      <pose>3 -6.5 0.0 0 0 2.0</pose>
+    </include>
+
+  </world>
+</sdf>

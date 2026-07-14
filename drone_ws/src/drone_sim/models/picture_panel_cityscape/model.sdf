@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="picture_panel_cityscape">
+    <static>true</static>
+    <link name="link">
+      <collision name="collision">
+        <geometry>
+          <box><size>1.6 0.05 1.1</size></box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <box><size>1.6 0.05 1.1</size></box>
+        </geometry>
+        <material>
+          <diffuse>1.0 1.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>materials/textures/photo.jpg</albedo_map>
+              <roughness>0.8</roughness>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

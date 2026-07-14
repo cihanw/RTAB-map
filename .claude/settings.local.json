@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /opt/ros/jazzy 2>&1 | head -20)",
+      "Bash(gz sim *)",
+      "Bash(dpkg -l)",
+      "Bash(systemd-detect-virt)",
+      "Bash(bash -c \"source /opt/ros/jazzy/setup.bash && ros2 pkg list 2>/dev/null | grep -E 'ros_gz|gz_ros' | head -10\")",
+      "Bash(bash -c \"source /opt/ros/jazzy/setup.bash && ros2 pkg list 2>/dev/null | grep -i rqt_image\")",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Read(//home/cihan/.gz/**)",
+      "Bash(getent hosts *)",
+      "Bash(python3 -c \"import sys, termios; termios.tcgetattr\\(sys.stdin\\); print\\('TTY OK - termios works'\\)\")",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(apt-cache search *)"
+    ]
+  }
+}

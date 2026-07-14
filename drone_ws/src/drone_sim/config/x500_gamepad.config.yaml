@@ -1,0 +1,39 @@
+# teleop_twist_joy mapping for Xbox Series X|S controller (model 1914, xpad driver).
+# Verified real axis/button layout with joy_node (8 axes, 12 buttons):
+#   axes:  0=Left stick X  1=Left stick Y  2=LT  3=Right stick X  4=Right stick Y  5=RT  6=D-pad X  7=D-pad Y
+#   buttons: 0=A 1=B 2=X 3=Y 4=LB 5=RB 6=View 7=Menu 8=Xbox 9=LeftStickClick 10=RightStickClick 11=Share
+#
+# Control scheme (same speed/direction rules as drone_teleop.py - 0.5 m/s, 1.0 rad/s):
+#   Left stick  Y axis -> forward/backward (linear.x)
+#   Left stick  X axis -> right/left       (linear.y)
+#   Right stick Y axis -> up/down          (linear.z)
+#   Right stick X axis -> turn/yaw         (angular.z)
+#   RB (deadman switch) -> no motion command sent unless held (safety)
+#   LB (turbo)          -> speed doubles while held
+#
+# NOTE: If an axis direction feels reversed (e.g., pushing stick right makes drone go left),
+# simply change the sign (+/-) of the corresponding scale_linear/scale_angular value.
+teleop_twist_joy_node:
+  ros__parameters:
+    axis_linear:
+      x: 1
+      y: 0
+      z: 4
+    scale_linear:
+      x: 0.5
+      y: 0.5
+      z: 0.5
+    scale_linear_turbo:
+      x: 1.0
+      y: 1.0
+      z: 1.0
+
+    axis_angular:
+      yaw: 3
+    scale_angular:
+      yaw: 1.0
+    scale_angular_turbo:
+      yaw: 1.5
+
+    enable_button: 5        # RB - no motion unless held
+    enable_turbo_button: 4  # LB - speed increases while held

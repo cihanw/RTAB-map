@@ -1,0 +1,60 @@
+# robot_localization ekf_node: Fuses raw visual odometry (rgbd_odometry,
+# /rtabmap/odom) with IMU (gyroscope+accelerometer). The goal is to let IMU
+# take over and estimate the pose for a few seconds when visual tracking is
+# briefly lost (high covariance/"null" message). Since the EKF Kalman gain
+# weights each incoming measurement according to its OWN covariance, the raw VO
+# message, whose covariance RTAB-Map artificially inflates to 9999 upon loss,
+# is automatically considered low weight without requiring extra code.
+#
+# world_frame=odom (NOT map): EKF only improves local/continuous estimation,
+# global loop-closure correction (map->odom) is still entirely RTAB-Map's job.
+#
+# ONLY angular velocity + linear acceleration from the IMU are used, absolute
+# orientation is NOT USED: the simulated IMU has no noise model (no <noise>
+# block defined in model.sdf), so directly trusting its "perfect" orientation
+# would yield unrealistic results. The EKF's own motion model inherently
+# integrates orientation from angular velocity anyway.
+ekf_node:
+  ros__parameters:
+    use_sim_time: true
+    # Reduced from 100 to 35: in live tests, this machine (running Gazebo
+    # GUI+server, RViz, rgbd_odometry, rtabmap, and bridge simultaneously)
+    # was already CPU-saturated (top: load average ~9.4/12). The ekf_node
+    # itself (~25% of a single core) plus rtabmap now listening to odom_topic
+    # at 100Hz (previously ~20Hz raw VO) pushed it over the edge, causing
+    # ekf_node to miss its 100Hz target by 1-4 seconds, and starving RViz
+    # to the point of freezing. For bridging purposes, 35Hz (33ms update
+    # interval) is more than sufficient anyway.
+    frequency: 35.0
+    sensor_timeout: 0.2
+    two_d_mode: false
+    publish_tf: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # D435 -> D455 transition (2026-07-10): IMU now comes from the D455's
+    # embedded IMU (same link as the camera), NOT from the x500's base_link.
+    imu0: /world/depot/model/drone/model/d455/link/link/sensor/imu_sensor/imu
+    # [x,y,z, roll,pitch,yaw, vx,vy,vz, vroll,vpitch,vyaw, ax,ay,az]
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  true,  true,  true,
+                  true,  true,  true]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10
+
+    odom0: /rtabmap/odom
+    odom0_config: [true,  true,  true,
+                   true,  true,  true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10

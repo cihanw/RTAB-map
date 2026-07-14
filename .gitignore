@@ -1,0 +1,28 @@
+# ROS 2 and Colcon
+build/
+install/
+log/
+src/*/build/
+src/*/install/
+src/*/log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.Python
+*.egg-info/
+
+# Logs and Frames generated during test runs
+drone_ws/log/
+drone_ws/monitor_bugs.py
+drone_ws/start_test.sh
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

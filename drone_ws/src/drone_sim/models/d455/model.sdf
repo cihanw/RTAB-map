@@ -1,0 +1,172 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+    <model name="realsense_d455">
+        <link name="link">
+            <inertial>
+                <mass>0.0615752</mass>
+                <inertia>
+                    <ixx>9.108e-05</ixx>
+                    <ixy>0</ixy>
+                    <ixz>0</ixz>
+                    <iyy>2.51e-06</iyy>
+                    <iyz>0</iyz>
+                    <izz>8.931e-05</izz>
+                </inertia>
+                <pose frame="">0 0 0 0 -0 0</pose>
+            </inertial>
+            <collision name="collision">
+                <geometry>
+                    <mesh>
+                        <uri>meshes/realsense.dae</uri>
+                    </mesh>
+                </geometry>
+            </collision>
+            <visual name="visual">
+                <geometry>
+                    <mesh>
+                        <uri>meshes/realsense.dae</uri>
+                        <submesh>
+                            <name>RealSense</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+                <material>
+                    <diffuse>1.0 1.0 1.0</diffuse>
+                    <specular>1.0 1.0 1.0</specular>
+                    <pbr>
+                        <metal>
+                            <albedo_map>materials/textures/RealSense_Albedo.png</albedo_map>
+                            <normal_map>materials/textures/RealSense_Normal.png</normal_map>
+                            <metalness_map>materials/textures/RealSense_Metalness.png</metalness_map>
+                            <roughness_map>materials/textures/RealSense_Roughness.png</roughness_map>
+                        </metal>
+                    </pbr>
+                    <!-- fallback to script if no PBR support-->
+                    <script>
+                        <uri>materials/scripts/</uri>
+                        <uri>materials/textures/</uri>
+                        <name>UrbanTile/RealSense_Diffuse</name>
+                    </script>
+                </material>
+            </visual>
+            <sensor name="realsense_d455" type="rgbd_camera">
+                <!-- D435 -> D455 transition (2026-07-10, user request): camera
+                     parameters were copied EXACTLY from d435/model.sdf (30 FPS /
+                     640x480 / same intrinsics/noise) - because all image-size-dependent
+                     settings (Vis/MaxFeatures, etc.) on the rgbd_odometry/rtabmap
+                     side were tuned according to this format, they were not changed.
+                     Although D455's real FOV is wider than D435's, it was INTENTIONALLY
+                     kept the same in this transition - the goal is to model
+                     D455's embedded IMU (below), not to readjust the camera
+                     optics; FOV change could be a separate, optional next step. -->
+                <update_rate>30</update_rate>
+                <camera name="camera">
+                    <!-- FOV 60 -> 87 deg RE-APPLIED (2026-07-12): briefly
+                         reverted to 60 while chasing "behavior doesn't
+                         match pre-frontier-system baseline", but user
+                         pinned the exact baseline moment in conversation
+                         and confirmed FOV was ALREADY 87 at that point
+                         (loop-closure package predates the frontier
+                         standoff work entirely - it was never part of
+                         what needed reverting). Restored. See lessons.md
+                         for the real D455 FOV rationale. -->
+                    <horizontal_fov>1.5184</horizontal_fov>
+                    <lens>
+                        <!-- fx = fy = width / ( 2 * tan (hfov / 2 ) )
+                             = 640 / (2 * tan(0.7592)) for the 87-deg FOV. -->
+                        <intrinsics>
+                            <fx>337.22195</fx>
+                            <fy>337.22195</fy>
+                            <!-- cx = ( width + 1 ) / 2 -->
+                            <cx>320.5</cx>
+                            <!-- cy = ( height + 1 ) / 2 -->
+                            <cy>240.5</cy>
+                            <s>0</s>
+                        </intrinsics>
+                    </lens>
+                    <distortion>
+                        <k1>0.0</k1>
+                        <k2>0.0</k2>
+                        <k3>0.0</k3>
+                        <p1>0.0</p1>
+                        <p2>0.0</p2>
+                        <center>0.5 0.5</center>
+                    </distortion>
+                    <image>
+                        <width>640</width>
+                        <height>480</height>
+                        <format>R8G8B8</format>
+                    </image>
+                    <!-- Near clip 0.1 -> 0.3 (2026-07-12, propeller
+                         self-view fix): at 87deg FOV the drone's own rotor
+                         hubs/arms (~0.19-0.25m slant from the lens) entered
+                         the frame - CONFIRMED by capturing a raw camera
+                         frame (props visible bottom corners). Two live
+                         symptoms, one cause: (1) the depth camera returned
+                         valid ~0.2m self-depth every frame, painting
+                         "trails" of the drone's own body into the map along
+                         its path; (2) VO latched onto the prop-hub corners -
+                         features rigidly attached to the camera that never
+                         move in the image - dragging translation estimates
+                         toward zero (worst vertically: ground truth z=2.95m
+                         vs believed 2.40m measured live, with an unbounded
+                         real climb commanded while believed z lagged).
+                         0.3 culled the hubs but a verification frame still
+                         showed the OUTER portions of the front prop discs
+                         (blade tips sweep out to ~0.39m slant) - raised to
+                         0.4, which covers the full disc AND exactly matches
+                         real D455 hardware (min depth range ~0.4m). Culls
+                         the props from BOTH rgb and depth renders. -->
+                    <clip>
+                        <near>0.4</near>
+                        <far>100</far>
+                    </clip>
+                    <depth_camera>
+                        <clip>
+                            <near>0.4</near>
+                            <far>10</far>
+                        </clip>
+                    </depth_camera>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0</mean>
+                        <stddev>0.007</stddev>
+                    </noise>
+                </camera>
+            </sensor>
+            <!-- Models the embedded IMU in the real D455 hardware - instead of
+                 relying on x500's OWN IMU (a "borrowed" sensor), an IMU formed
+                 in the SAME link as the camera is used for visual odometry/EKF
+                 (see x500_d455/model.sdf and the new static_tf_imu in
+                 slam.launch.py). update_rate=250: EXACTLY the same value as x500's own
+                 imu_sensor - for consistency (so sensor_timeout/frequency settings
+                 in ekf.yaml don't need re-tuning). Although the IMU in the real
+                 D455 is physically offset a few mm from the optical center, in this
+                 drone-scale simulation (0.15m mounting height, camera's own 0.007
+                 noise margin) there is no practical benefit to modeling that
+                 offset - so a separate <pose> was not given, it is defined in
+                 the SAME link/pose as the camera. -->
+            <sensor name="imu_sensor" type="imu">
+                <always_on>1</always_on>
+                <update_rate>250</update_rate>
+            </sensor>
+        </link>
+        <!-- Since the IMU sensor is defined in this model's OWN link, the Imu
+             system plugin that activates it must also be within the SAME model scope
+             (NOT x500_d455, here) - in gz-sim, an Imu system plugin ONLY
+             activates <sensor type="imu"> tags within its own <model> tree scope
+             (same pattern in x500's own model.sdf: its Imu plugin is also directly
+             under its own <model> tag, activating its own imu_sensor). Since d455
+             and x500_d455 are separate <include> scopes (only connected by a fixed
+             joint, not nested), if this plugin were MISSING the sensor would exist
+             in SDF but SILENTLY not produce data (must be verified in live test -
+             see tasks/, verification steps).
+             NOTE: "libignition-gazebo-imu-system.so" (the OLD name used by x500's
+             Fuel model) DOES NOT EXIST as a file in this system, there is only
+             "libgz-sim-imu-system.so" (verified) - so the CURRENT naming was used
+             below (the hand-written MulticopterVelocityControl plugin in
+             x500_d435/model.sdf also already uses this current rule). -->
+        <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    </model>
+</sdf>

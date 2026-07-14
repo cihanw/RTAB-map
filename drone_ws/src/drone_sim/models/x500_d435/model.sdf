@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <model name="x500_d435">
+    
+    <!-- Include the base X500 drone model from Gazebo Fuel -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/alireza73/models/x500</uri>
+      <name>x500</name>
+      <!-- We position the drone at the origin -->
+      <pose>0 0 0.25 0 0 0</pose>
+
+      <!-- Inject the MulticopterVelocityControl plugin inside the included model -->
+      <!-- This allows the plugin to find 'base_link' and the rotor joints locally -->
+      <plugin
+        filename="gz-sim-multicopter-control-system"
+        name="gz::sim::systems::MulticopterVelocityControl">
+        <robotNamespace>x500</robotNamespace>
+        <commandSubTopic>cmd_vel</commandSubTopic>
+        <comLinkName>base_link</comLinkName>
+        <enableActuatorVelocity>true</enableActuatorVelocity>
+        <velocityGain>4 4 15</velocityGain>
+        <attitudeGain>1 1 0.8</attitudeGain>
+        <angularRateGain>0.3 0.3 0.3</angularRateGain>
+        <rotorConfiguration>
+          <rotor>
+            <jointName>rotor_0_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_1_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_2_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+          <rotor>
+            <jointName>rotor_3_joint</jointName>
+            <forceConstant>8.29e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+        </rotorConfiguration>
+      </plugin>
+    </include>
+
+    <!-- Include the Intel RealSense D435 model - from the LOCAL copy in the
+         project's own models/d435/ directory (not Fuel's shared cache), because
+         we increased update_rate from 15 to 30; we applied this change to a
+         trackable copy belonging to the project instead of the shared Fuel cache. -->
+    <!-- YAW FIX (2026-07-08, user complaint + VERIFIED with live test):
+         yaw=1.5708 (90 degrees) was here previously. This was shifting the camera's
+         ACTUAL viewing direction from the drone's +X (forward/moving) axis to the
+         +Y (side) axis - since the drone can only move in the +X direction
+         (unicycle model, local_planner.py) the camera was scanning a direction
+         it would never go/see. Evidence: when the drone was stopped and pose fixed,
+         an object (SUV) in the calculated "+90 degrees left" viewing angle appeared
+         in the image, the object (standing_person) in the "0 degrees forward"
+         viewing angle DID NOT APPEAR.
+         When yaw is set to 0 (below), the optical-frame transform in
+         static_transform_publisher (see slam.launch.py) was updated accordingly -
+         there is NO mounting rotation anymore, only the standard body->optical
+         transform (roll=-90, yaw=-90) is applied. -->
+    <include>
+      <uri>model://d435</uri>
+      <name>d435</name>
+      <!-- Position it at the center of the drone, raised further (z=0.40) to be completely above the body -->
+      <pose>0 0 0.40 0 0 0</pose>
+    </include>
+
+    <!-- Create a fixed joint to attach the camera securely to the drone frame -->
+    <joint name="camera_joint" type="fixed">
+      <parent>x500::base_link</parent>
+      <child>d435::link</child>
+    </joint>
+
+  </model>
+</sdf>
