@@ -532,3 +532,34 @@ all-nan frame safe.
 consume the same delayed/imperfect intermediate representation, add ONE
 guard on the rawest available signal instead of continuing to tune
 downstream consumers.**
+
+## 17. WARN-only log capture made accepted loop closures invisible (2026-07-13/16)
+
+**What happened:** for the entire loop-closure investigation, "did any
+closure get accepted?" was answered by grepping `sim_run.log` for
+rejection messages and checking whether a rejection blamed an
+already-in-the-graph edge. A run that showed a sudden map distortion but
+ZERO such evidence was confidently declared "closure-free, must be pure
+drift." Wrong: querying `~/.ros/rtabmap.db`'s `Link` table directly (the
+actual committed pose graph, ground truth for what was ever added)
+showed 8 GlobalLoopClosure + 1 ProximitySpace links had been accepted in
+that exact run - invisible to the log entirely.
+
+**Root cause:** RTAB-Map logs closure *rejections* at WARN level (what
+our launch captures) but closure *acceptances* only at INFO level (never
+captured). The rejection-blame heuristic is a real detector for SOME
+accepted-but-later-conflicting closures, but it is not a substitute for
+ground truth - a closure that never conflicts with anything later
+produces zero log evidence of ever having existed, in either direction.
+
+**Fix / standing rule:** any "was a closure accepted" question during
+this investigation must be answered from `~/.ros/rtabmap.db` (`SELECT
+type, from_id, to_id, transform FROM Link` - Python's builtin `sqlite3`
+module works directly on the file, no server needed; `sqlite3` CLI is
+NOT installed on this machine), not from log greps. The log is a real
+diagnostic (rejection reasons, VO quality, timing) but was never a
+complete record of graph mutations and should not have been treated as
+one. **Rule: when a tool only surfaces one severity level of a system's
+logging, "no WARN/ERROR seen" proves absence of *failures*, not absence
+of *events* - before concluding "X never happened," check whether X is
+even the kind of thing that would log at a level you're capturing.**
