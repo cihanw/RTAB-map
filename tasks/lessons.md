@@ -494,3 +494,41 @@ shrinks the per-target cost of the (now rarer) genuine dead-end case.
 reason about all of a point's dimensions (here: z) will silently leak -
 match the blacklist's dimensionality to what the downstream planner
 actually consults, not to the full state vector of the rejected target.**
+
+## 16. Depth-image forward guard — the close-proximity fix, third incident (2026-07-16)
+
+**What happened:** despite the proximity-margin bumps (influence 1.0,
+min_safe 0.5, inflation 0.55 — lesson from the roller-door incident),
+the close-proximity failure recurred: gt-vs-SLAM logging caught the
+drone physically wedged against a wooden crate TWICE in the same
+endgame (gt x,y frozen to the millimeter at (1.343,-6.769) then
+(0.584,-6.351)), at ~1.75m REAL altitude (contact slide pushed it above
+its 1.0m command ceiling), camera half-filled with the crate at
+point-blank range. VO limped at quality ~350 on the remaining open half
+- the user's observed rule: the moment the camera turns fully into the
+obstacle, VO is permanently lost.
+
+**Why margins alone can't fix it:** the map-based layers (cloud ->
+octomap -> grid -> APF/inflation) share one pipeline with SECONDS of
+latency plus systematic holes (thin/unmapped/stale geometry). Every
+contact incident had the same shape: the obstacle was under-represented
+in the map at approach time, so no tuning of map-consuming layers helps.
+
+**Fix: depth-image forward guard in local_planner.** Subscribes to the
+raw 32FC1 depth stream (30Hz, bridged already for rgbd_odometry); ROI =
+upper-middle band (rows [h/4,h/2) - floor CANNOT enter it at low flight
+altitudes; cols [w/4,3w/4)); if min valid ROI depth <
+`depth_guard_stop_m` (0.7), forward translation is hard-zeroed in the
+translate branch of compute_motion_command. Rotation and vertical stay
+allowed (turning away / climbing ARE the escape moves), so no new
+deadlock class: APF heading keeps evolving and the state machine can
+rotate out. Camera near-clip 0.4 (real D455 min range) means readable
+values live in [0.4,inf): 0.7 = a 0.3m reaction band = ~5 control ticks
+at max speed. Fail-open on stale (>0.5s) or all-invalid depth. Verified
+offline: floor-only frame does not fire, wall-ahead at 0.65m fires,
+all-nan frame safe.
+
+**Rule: when a failure class survives repeated tuning of layers that all
+consume the same delayed/imperfect intermediate representation, add ONE
+guard on the rawest available signal instead of continuing to tune
+downstream consumers.**

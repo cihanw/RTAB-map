@@ -37,7 +37,7 @@ import tf2_ros
 from geometry_msgs.msg import PoseStamped, Twist, Vector3
 from nav_msgs.msg import Odometry
 from scipy.spatial import cKDTree
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 
 # Goal subscription uses the latched profile: every publisher in the target
@@ -122,6 +122,22 @@ class LocalPlanner(Node):
         # violating component - momentum overshot the bound when the push
         # was merely stopped (tested live). Was hardcoded 0.3.
         self.declare_parameter('geofence_recovery_speed', 0.3)
+        # DEPTH GUARD (2026-07-16, after the third frame-verified wall-
+        # contact incident): if the minimum valid depth in the camera's
+        # forward ROI drops below this, forward translation is hard-zeroed
+        # (rotation and vertical stay allowed - turning AWAY and climbing
+        # are exactly the escape moves). Prevention-first per project
+        # policy: this acts within one 30Hz frame, where the cloud->octomap
+        # ->grid->APF chain reacted only seconds later. Note the camera
+        # near-clip is 0.4 (real D455 min range), so readable values live
+        # in [0.4, inf): 0.7 gives a 0.3m reaction band = ~0.5s at max
+        # 0.6 m/s = 5 control ticks. Fail-open on stale/no depth data
+        # (>0.5s old): guard silently inactive, old behavior preserved.
+        self.declare_parameter('depth_guard_stop_m', 0.7)
+        self.declare_parameter(
+            'depth_topic',
+            '/world/depot/model/drone/model/d455/link/link/sensor/'
+            'realsense_d455/depth_image')
         self.declare_parameter('obstacle_topic', '/rtabmap/octomap_obstacles')
         # Overridden to /theta_star/next_waypoint in autonomous.launch.py.
         self.declare_parameter('goal_topic', '/local_planner/current_target')
@@ -178,6 +194,7 @@ class LocalPlanner(Node):
         self.min_altitude = p('min_altitude').value
         self.max_altitude = p('max_altitude').value
         self.geofence_recovery_speed = p('geofence_recovery_speed').value
+        self.depth_guard_stop_m = p('depth_guard_stop_m').value
         self.map_frame = p('map_frame').value
         self.base_frame = p('base_frame').value
         self.odom_cov_threshold = p('odom_cov_threshold').value
@@ -218,6 +235,12 @@ class LocalPlanner(Node):
             LATCHED_QOS)
         self.create_subscription(
             Odometry, p('odom_topic').value, self.odom_callback, 10)
+        # DEPTH GUARD input (see depth_guard_stop_m). Raw depth frames at
+        # 30Hz - the callback only slices a ROI and takes a min, cheap.
+        self.min_forward_depth = float('inf')
+        self.min_forward_depth_time = None
+        self.create_subscription(
+            Image, p('depth_topic').value, self.depth_callback, 1)
 
         self.create_timer(1.0 / self.control_rate_hz, self.control_loop)
         self.get_logger().info('Local planner started successfully.')
@@ -225,6 +248,22 @@ class LocalPlanner(Node):
     # ------------------------------------------------------------------
     # Inputs
     # ------------------------------------------------------------------
+
+    def depth_callback(self, msg):
+        """DEPTH GUARD (2026-07-16): fast forward-proximity sensing straight
+        off the raw 32FC1 depth image, bypassing the slow cloud -> octomap
+        -> grid pipeline whose latency let the drone reach physical wall
+        contact three separate times (frame-verified incidents) before any
+        map-based layer reacted. ROI = the upper-middle band of the frame:
+        rows [h/4, h/2) so the floor (which legitimately reads < 1m in the
+        lower rows at low flight altitudes) can never trigger it, cols
+        [w/4, 3w/4) covering the direction of travel."""
+        h, w = msg.height, msg.width
+        depth = np.frombuffer(msg.data, dtype=np.float32).reshape(h, w)
+        roi = depth[h // 4: h // 2, w // 4: 3 * w // 4]
+        valid = roi[np.isfinite(roi) & (roi > 0.05)]
+        self.min_forward_depth = float(valid.min()) if valid.size else float('inf')
+        self.min_forward_depth_time = self.get_clock().now()
 
     def obstacle_callback(self, msg):
         raw = point_cloud2.read_points(
@@ -423,6 +462,19 @@ class LocalPlanner(Node):
                                         min(self.max_angular_speed, yaw_rate)))
         else:
             twist.linear.x = float(planar_speed)
+            # DEPTH GUARD enforcement (see depth_guard_stop_m): forward
+            # translation only - rotation and vertical are untouched.
+            now = self.get_clock().now()
+            depth_fresh = (
+                self.min_forward_depth_time is not None and
+                (now - self.min_forward_depth_time).nanoseconds / 1e9 < 0.5)
+            if depth_fresh and self.min_forward_depth < self.depth_guard_stop_m:
+                twist.linear.x = 0.0
+                self.get_logger().warn(
+                    f'[DEPTH-GUARD] forward stop: obstacle at '
+                    f'{self.min_forward_depth:.2f}m (< '
+                    f'{self.depth_guard_stop_m:.2f}m).',
+                    throttle_duration_sec=2.0)
         twist.linear.z = float(v_world[2])  # vertical is state-independent
         return twist
 
