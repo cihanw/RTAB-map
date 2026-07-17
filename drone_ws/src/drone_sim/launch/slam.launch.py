@@ -310,6 +310,21 @@ def generate_launch_description():
             #   was NOT intended (lesson 9: shared args feed both nodes).
             # - Kp/MaxFeatures 500 (default) -> 1000: richer BoW place
             #   signatures, sharper discrimination, 1Hz so CPU-cheap.
+            # GridGlobal/UpdateError 0.01 (default) -> 0.1 (2026-07-17,
+            # stutter/freeze incident): rtabmap rebuilds the ENTIRE
+            # octomap/occupancy-grid map cache from scratch whenever any
+            # optimized pose has moved more than this many meters since
+            # the last assembly - cost scales with map size. With
+            # Optimizer/Robust continuously re-weighting edges every
+            # cycle (see above), poses jitter past the 1cm default
+            # somewhere among hundreds of nodes EVERY cycle late in a
+            # run, so the full rebuild (measured 11-14s against a 1s
+            # budget at WM=342) fired every cycle and never recovered -
+            # this IS the "stutters as the map grows" the user felt, and
+            # it starved NBV/Theta* of a fresh map, compounding freeze
+            # frequency. 0.1m tolerates that jitter while still
+            # rebuilding for genuine closure corrections (this run's
+            # were 0.1-1.4m, all well above the new threshold).
             # - RGBD/LoopGravitySigma 0.3 set explicitly: IMU gravity
             #   consistency check on closures (secondary - depot aliases
             #   are mostly yaw-rotated, invisible to gravity - but free).
@@ -335,7 +350,52 @@ def generate_launch_description():
             # revisits clear 14. Quality gates (PnPReprojError 1.5,
             # LoopGravitySigma, LoopThr 0.20, OptimizeMaxError 5) unchanged.
             # Odometry keeps its own 13 via odom_args below.
-            'rtabmap_args': '--delete_db_on_start --Grid/RayTracing true --Grid/CellSize 0.1 --Grid/MinClusterSize 3 --RGBD/OptimizeMaxError 5 --Rtabmap/LoopThr 0.20 --Vis/MaxFeatures 2000 --Vis/MinInliers 14 --Vis/PnPReprojError 1.5 --Kp/MaxFeatures 1000 --RGBD/LoopGravitySigma 0.3',
+            # RGBD/OptimizeMaxError 5 -> 0 (disabled), Optimizer/Robust
+            # false -> true (2026-07-17 incident): live test caught a
+            # closure (451<->181) that this threshold was structurally
+            # unable to catch. Rejected closure 182<->449 (11:17:24) scored
+            # graph-error ratio 5.54, correctly blocked. Closure 451<->181
+            # (11:17:26, ~1s later) scored only 3.83 - UNDER the 5.0 gate -
+            # yet its acceptance instantly warped the believed pose by
+            # 9.76m/162 deg (Localization pose 4.16,-2.98 -> -13.07,2.96).
+            # Root cause: OptimizeMaxError's ratio is computed from the
+            # SINGLE WORST edge anywhere in the whole graph after
+            # optimization, not from the magnitude of the correction the
+            # NEW edge itself causes - a wrong edge whose error distributes
+            # smoothly across a large graph (332 nodes/668 edges here) can
+            # score a low worst-edge ratio while still being globally
+            # catastrophic. This session's own history (see the MinInliers
+            # 20->15->14 and OptimizeMaxError 3->8->5 notes above) already
+            # proved scalar accept/reject thresholds can't reliably
+            # separate genuine closures from the depot's repetitive-shelf
+            # aliasing. Optimizer/Robust (Vertigo switchable constraints,
+            # compatible with Optimizer/Strategy=2/GTSAM in use here)
+            # down-weights a bad edge's influence DURING optimization
+            # instead of hard-gating it beforehand - the standard SLAM
+            # answer to exactly this failure mode. Verified via
+            # `rtabmap --params`: mutually exclusive with
+            # RGBD/OptimizeMaxError, hence disabling (0) rather than
+            # tuning it further. All earlier gates (MinInliers 14, LoopThr
+            # 0.20, PnPReprojError 1.5, LoopGravitySigma, Kp/MaxFeatures
+            # 1000) are UNCHANGED - they still filter which hypotheses get
+            # proposed; this only replaces the final accept/reject check.
+            # --uinfo (2026-07-16, lesson 17 fix): raises RTAB-Map's OWN
+            # internal ULogger console threshold from its default --uwarn
+            # to info. This is a SEPARATE mechanism from the ROS
+            # `--log-level rtabmap.rtabmap:=info` args below (which only
+            # gate the ROS-WRAPPER's rclcpp log calls, e.g. the periodic
+            # "rtabmap (N): Rate=..." stats line - already visible without
+            # this flag). Core-library messages like "Loop closure
+            # detected!" go through ULogger and were invisible to every
+            # WARN-level grep this session even with the ROS log-level
+            # already at info - confirmed via `rtabmap --help`, which
+            # lists --uinfo/--udebug/--uwarn/--uerror as the actual
+            # console-verbosity control. Verified via `ros2 topic list`
+            # that /rtabmap/info exists as a live alternative signal
+            # (see closure_monitor.py) - this flag is for making the plain
+            # sim_run.log itself human-readable per user request, not a
+            # replacement for that.
+            'rtabmap_args': '--uinfo --delete_db_on_start --Grid/RayTracing true --Grid/CellSize 0.1 --Grid/MinClusterSize 3 --RGBD/OptimizeMaxError 0 --Optimizer/Robust true --Rtabmap/LoopThr 0.20 --Vis/MaxFeatures 2000 --Vis/MinInliers 14 --Vis/PnPReprojError 1.5 --Kp/MaxFeatures 1000 --RGBD/LoopGravitySigma 0.3 --GridGlobal/UpdateError 0.1',
             # Odometry-specific overrides (odometry = rtabmap_args + these,
             # last occurrence wins):
             # - Vis/MinInliers back to 13: tracking sensitivity (see above).

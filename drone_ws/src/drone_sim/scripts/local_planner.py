@@ -124,16 +124,30 @@ class LocalPlanner(Node):
         self.declare_parameter('geofence_recovery_speed', 0.3)
         # DEPTH GUARD (2026-07-16, after the third frame-verified wall-
         # contact incident): if the minimum valid depth in the camera's
-        # forward ROI drops below this, forward translation is hard-zeroed
-        # (rotation and vertical stay allowed - turning AWAY and climbing
-        # are exactly the escape moves). Prevention-first per project
-        # policy: this acts within one 30Hz frame, where the cloud->octomap
-        # ->grid->APF chain reacted only seconds later. Note the camera
-        # near-clip is 0.4 (real D455 min range), so readable values live
-        # in [0.4, inf): 0.7 gives a 0.3m reaction band = ~0.5s at max
-        # 0.6 m/s = 5 control ticks. Fail-open on stale/no depth data
-        # (>0.5s old): guard silently inactive, old behavior preserved.
+        # forward ROI drops below this, forward translation is replaced
+        # with a small REVERSE nudge (rotation and vertical stay allowed -
+        # turning AWAY and climbing are exactly the escape moves too).
+        # Prevention-first per project policy: this acts within one 30Hz
+        # frame, where the cloud->octomap->grid->APF chain reacted only
+        # seconds later. Note the camera near-clip is 0.4 (real D455 min
+        # range), so readable values live in [0.4, inf): 0.7 gives a 0.3m
+        # reaction band = ~0.5s at max 0.6 m/s = 5 control ticks.
+        # Fail-open on stale/no depth data (>0.5s old): guard silently
+        # inactive, old behavior preserved.
         self.declare_parameter('depth_guard_stop_m', 0.7)
+        # Reverse nudge (2026-07-16): a bare stop only stopped the drone -
+        # a live 17-min run showed it then wait ~90s for NBV/theta*'s OWN
+        # target churn to eventually hand it a different-enough bearing
+        # to escape (yaw keeps tracking the live APF-desired heading even
+        # while forward speed is zeroed, so it wasn't stuck-stuck, just
+        # slow). Small, continuous reverse (not a timed burst - re-derived
+        # fresh from the current depth reading every tick, same as the
+        # rest of this guard) while the trigger holds: releases itself the
+        # instant depth clears next tick, same direction convention as the
+        # removed wedge-watchdog ("back along the current heading, never
+        # rotate - rotation is what a wedge/wall blocks"). No rearward
+        # sensor exists, so kept deliberately gentle.
+        self.declare_parameter('depth_guard_reverse_speed', 0.25)
         self.declare_parameter(
             'depth_topic',
             '/world/depot/model/drone/model/d455/link/link/sensor/'
@@ -195,6 +209,7 @@ class LocalPlanner(Node):
         self.max_altitude = p('max_altitude').value
         self.geofence_recovery_speed = p('geofence_recovery_speed').value
         self.depth_guard_stop_m = p('depth_guard_stop_m').value
+        self.depth_guard_reverse_speed = p('depth_guard_reverse_speed').value
         self.map_frame = p('map_frame').value
         self.base_frame = p('base_frame').value
         self.odom_cov_threshold = p('odom_cov_threshold').value
@@ -469,9 +484,9 @@ class LocalPlanner(Node):
                 self.min_forward_depth_time is not None and
                 (now - self.min_forward_depth_time).nanoseconds / 1e9 < 0.5)
             if depth_fresh and self.min_forward_depth < self.depth_guard_stop_m:
-                twist.linear.x = 0.0
+                twist.linear.x = -self.depth_guard_reverse_speed
                 self.get_logger().warn(
-                    f'[DEPTH-GUARD] forward stop: obstacle at '
+                    f'[DEPTH-GUARD] reversing: obstacle at '
                     f'{self.min_forward_depth:.2f}m (< '
                     f'{self.depth_guard_stop_m:.2f}m).',
                     throttle_duration_sec=2.0)
@@ -483,18 +498,16 @@ class LocalPlanner(Node):
     # ------------------------------------------------------------------
 
     def control_loop(self):
-        # 3. GOAL lifecycle -------------------------------------------------
-        if self.current_goal is None:
-            self.cmd_vel_pub.publish(Twist())
-            self.get_logger().info(
-                'Waiting for goal...', throttle_duration_sec=2.0)
-            return
-        # Reached-latch: once inside goal_tolerance the state LATCHES until
-        # a new goal message arrives. Without the latch, SLAM noise around
-        # the threshold re-engaged APF and caused oscillation (live bug).
-        if self.goal_reached:
-            self.cmd_vel_pub.publish(Twist())
-            return
+        # SAFETY-BEFORE-GOAL ORDERING (2026-07-17 incident): health, pose
+        # acquisition and the z-sanity envelope now run BEFORE the goal
+        # gates. Previously the goal-none / goal-reached early returns sat
+        # first, so a drone with a latched reached-flag whose next waypoint
+        # never arrived (theta* start cell stuck inside wall inflation ->
+        # every plan failed for 43 MINUTES) skipped every safety layer
+        # below while its zero-twist hover crept upward ~2mm/s in wall
+        # contact - to a REAL 5.4m altitude, believed 5.0m, with the
+        # sanity guard structurally blind the whole time. Safety checks
+        # must be unconditional per tick; only PURSUIT is goal-gated.
 
         # 1. HEALTH ---------------------------------------------------------
         if not self.is_odometry_healthy():
@@ -561,6 +574,19 @@ class LocalPlanner(Node):
             self.get_logger().info(
                 'Post-recovery grace hover (pose settling)...',
                 throttle_duration_sec=2.0)
+            return
+
+        # 3. GOAL lifecycle (pursuit gates - AFTER all safety layers) --------
+        if self.current_goal is None:
+            self.cmd_vel_pub.publish(Twist())
+            self.get_logger().info(
+                'Waiting for goal...', throttle_duration_sec=2.0)
+            return
+        # Reached-latch: once inside goal_tolerance the state LATCHES until
+        # a new goal message arrives. Without the latch, SLAM noise around
+        # the threshold re-engaged APF and caused oscillation (live bug).
+        if self.goal_reached:
+            self.cmd_vel_pub.publish(Twist())
             return
 
         # 4. FORCES ---------------------------------------------------------

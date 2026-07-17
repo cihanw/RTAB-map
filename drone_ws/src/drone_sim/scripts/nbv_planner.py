@@ -62,7 +62,13 @@ TARGET_QOS = QoSProfile(
 # Unreachable-region blacklist: bounded so ancient entries eventually age
 # out; entries are XY-only (see blacklist_radius_m declaration) and the
 # matching radius is a declared parameter, not derived from voxel_size.
-BLACKLIST_MAXLEN = 50
+# 50 -> 200 (2026-07-17, hardware/freeze-frequency incident): a 45-
+# unreachable-event run wrapped this deque ~1x, aging out and re-trying
+# still-dead regions late in the run - directly adding to freeze
+# frequency on top of the stale-map-driven Theta* failures (see
+# GridGlobal/UpdateError fix in slam.launch.py). 200 gives headroom for
+# a full exploration run without re-trying recently-dead regions.
+BLACKLIST_MAXLEN = 200
 
 
 class NBVPlanner(Node):

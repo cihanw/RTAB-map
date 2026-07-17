@@ -563,3 +563,61 @@ one. **Rule: when a tool only surfaces one severity level of a system's
 logging, "no WARN/ERROR seen" proves absence of *failures*, not absence
 of *events* - before concluding "X never happened," check whether X is
 even the kind of thing that would log at a level you're capturing.**
+
+## 18. DB-polling closure monitor crashed rtabmap mid-run (2026-07-16)
+
+**What happened:** a long, otherwise-healthy test run (bounded drift,
+genuine closures healing it, zero VO loss) ended with the drone frozen
+then vanishing from RViz. rtabmap had died: `DBDriverSqlite3.cpp
+addStatisticsQuery() ... database is locked`, fatal abort (exit -6). The
+process I built for lesson 17 (polling `rtabmap.db` every 15s with
+Python's `sqlite3` to catch accepted closures live) was reading the same
+file rtabmap was actively writing; a read caught the write lock and
+rtabmap treats that as unrecoverable. Gazebo/the drone itself never
+crashed - once rtabmap died, `map->odom` just stopped, so RViz lost the
+ability to display it. Easy to misread as "the drone disappeared."
+
+**Fix: stopped touching the database entirely.** `rtabmap_msgs/msg/Info`
+(topic `/rtabmap/info`, confirmed present on `ros2 topic list`) publishes
+`loop_closure_id` / `proximity_detection_id` (non-zero = accepted this
+cycle) and the actual `loop_closure_transform` (a proper quaternion, no
+need to reconstruct rotation from a raw matrix trace) live over ROS every
+~1Hz processing cycle - the real-time signal this whole investigation
+needed from the start, with zero file contention. `closure_monitor.py`
+replaces `closure_poller.py`.
+
+**Rule: a database file being actively written by a live process is not
+a safe concurrent-read target, even for read-only queries, even with a
+short poll interval - if the writer publishes the same information over
+IPC (a topic, a service), use that instead of the file. Reserve direct
+DB inspection for POST-MORTEM analysis after the writer has exited.**
+
+## 19. Latched-goal deadlock bypassed EVERY safety layer for 43 minutes (2026-07-17)
+
+**What happened:** drone reached a target near the east wall, latched
+goal_reached, and waited for the next waypoint. Theta* could never
+produce one: pinned against the wall, the drone's own grid cell sat
+inside the 0.55m inflation zone and the start-snap radius (3 cells =
+0.6m) barely out-reached it - every plan failed, 298+ unreachable
+events churned, and the blacklist (maxlen 50) aged out and re-picked
+regions ~6 times over. Meanwhile control_loop's goal-reached gate sat
+ABOVE the health/pose/sanity blocks, so the zero-twist hover it
+published every tick was never sanity-checked: a ~2mm/s contact-creep
+against the wall accumulated to a REAL 5.4m altitude (believed 5.0m -
+2.5x the sanity ceiling) with the guard structurally blind. VO stayed
+healthy on wall brick texture throughout - none of the health layers
+had anything to object to; the unchecked layers were the problem.
+
+**Fixes:** (1) control_loop reordered - health, pose, z-sanity, grace
+now run unconditionally BEFORE the goal-none/goal-reached pursuit
+gates. Only pursuit is goal-gated; safety is per-tick. (2)
+start_snap_radius_cells 3 -> 5 (1.0m) so a wall-pinned start can always
+escape its own inflation: keep >= ceil(inflation/resolution)+2 if
+either parameter changes.
+
+**Rule: early-return gates are implicit priority declarations - any
+check placed below one silently inherits "this can be skipped." Audit
+what sits below every `return` in a safety-relevant loop; guards that
+must ALWAYS run belong above every conditional exit, no matter how
+innocent the gate above them looks ("we're parked, nothing to do" was
+exactly the state in which the drone drifted 4 meters).**

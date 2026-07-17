@@ -139,9 +139,16 @@ class ThetaStarPlanner(Node):
         # and open-list-exhausted both return None into the same fail path.
         self.declare_parameter('max_search_iterations', 10000)
         # Bounded escape if the drone's own cell reads blocked (transient
-        # inflation edge as the map updates). Small on purpose - a large
-        # radius would mask real problems.
-        self.declare_parameter('start_snap_radius_cells', 3)
+        # inflation edge as the map updates). 3 -> 5 (2026-07-17 incident):
+        # 3 cells = 0.6m barely exceeded inflation_radius_m (0.55), so a
+        # drone physically pinned AGAINST a wall sat deeper in the inflated
+        # zone than the snap could escape - every plan failed for 43
+        # straight minutes (the latched-goal deadlock incident). The snap
+        # must out-reach inflation with margin: 5 cells = 1.0m covers
+        # inflation + the drone pressed to the obstacle surface itself.
+        # Keep >= ceil(inflation_radius_m/grid_resolution) + 2 if either
+        # of those parameters changes.
+        self.declare_parameter('start_snap_radius_cells', 5)
         # HARD CONSTRAINT: must stay strictly below nbv_planner's
         # goal_tolerance (0.5). If the snapped path end sat farther than
         # that from the true NBV target, NBV would never detect arrival and
