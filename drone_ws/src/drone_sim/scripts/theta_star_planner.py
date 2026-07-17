@@ -64,7 +64,14 @@ LATCHED_QOS = QoSProfile(
 # of avoiding repeat failures against the SAME obstacle, the extra
 # patience of 5 attempts bought little; cutting to 3 shrinks the
 # per-target cost of the (now rarer) genuine dead-end case.
-UNREACHABLE_FAIL_THRESHOLD = 3
+# 3 -> 2 (2026-07-17, freeze-frequency incident): the original 3rd-retry
+# patience existed for a still-maturing/stale grid; GridGlobal/UpdateError
+# 0.1 (slam.launch.py) now keeps the grid fresh at ~1Hz, so a 3rd attempt
+# against an unchanged grid was pure wasted time - live log showed 14
+# consecutive unreachable targets (5 along one dead frontier ridge) each
+# paying the full 3-attempt cost, a single 154s freeze. 2 keeps one
+# genuine retry while cutting ~3s off every dead candidate.
+UNREACHABLE_FAIL_THRESHOLD = 2
 
 # Goal-change detection epsilon (m): NBV voxel targets differ by >= one
 # 0.2m voxel, so anything materially smaller works.

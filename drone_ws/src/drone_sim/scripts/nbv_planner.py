@@ -116,7 +116,17 @@ class NBVPlanner(Node):
         # (same physical scale: how far the global planner treats a wall
         # as "occupied") - NOT enforced cross-node, keep them in sync
         # manually if either changes.
-        self.declare_parameter('blacklist_radius_m', 0.55)
+        # 0.55 -> 1.0 (2026-07-17, freeze-frequency incident): live log
+        # showed 5 consecutive unreachable candidates along one dead
+        # frontier ridge, spaced 0.6-1.0m apart - just outside the old
+        # radius, so blacklisting one did nothing to suppress its
+        # neighbors and each paid the full per-target planning-failure
+        # cost in sequence. 1.0 covers that observed spacing. Trade-off:
+        # a genuinely reachable frontier within 1.0m of a dead one is now
+        # also suppressed - accepted, since frontier-rich areas always
+        # have candidates further out and the alternative demonstrably
+        # burns minutes per dead ridge.
+        self.declare_parameter('blacklist_radius_m', 1.0)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
         # Hard candidate altitude band. Shares its name and floor with
