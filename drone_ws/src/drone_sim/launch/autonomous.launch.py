@@ -1,17 +1,28 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                            TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_drone_sim = get_package_share_directory('drone_sim')
-    
+
+    # Passed through bringup.launch.py to sim.launch.py's 'gui' argument.
+    # Default false (headless) preserves every existing invocation; run
+    # with 'ros2 launch drone_sim autonomous.launch.py gui:=true' for the
+    # interactive Gazebo client (see sim.launch.py for the VRAM note).
+    gui_arg = DeclareLaunchArgument(
+        'gui', default_value='false',
+        description='Launch Gazebo with its GUI client instead of headless.')
+
     # Include the main bringup launch file (Gazebo, rtabmap, EKF, etc.)
     bringup_launch_path = os.path.join(pkg_drone_sim, 'launch', 'bringup.launch.py')
     bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(bringup_launch_path)
+        PythonLaunchDescriptionSource(bringup_launch_path),
+        launch_arguments={'gui': LaunchConfiguration('gui')}.items(),
     )
 
     # Local Planner: Autonomous obstacle avoidance and goal navigation
@@ -73,6 +84,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        gui_arg,
         bringup,
         local_planner,
         nbv_planner,

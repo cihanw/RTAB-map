@@ -1,28 +1,81 @@
-# ROS 2 and Colcon
+# Explicitly Ignored Project Files & Directories
+CLAUDE.md
+AGENTS.md
+tasks
+tasks/
+
+# ROS 2 & Colcon Build Artifacts
 build/
 install/
 log/
-src/*/build/
-src/*/install/
-src/*/log/
+**/build/
+**/install/
+**/log/
+drone_ws/build/
+drone_ws/install/
+drone_ws/log/
+drone_ws/venv/
 
-# Python
+# Python Caches & Virtual Environments
 __pycache__/
-*.pyc
-*.pyo
-venv/
-env/
+*.py[cod]
+*$py.class
+*.so
 .Python
 *.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+ENV/
+drone_ws/src/*/build/
+drone_ws/src/*/install/
+drone_ws/src/*/log/
 
-# Logs and Frames generated during test runs
-drone_ws/log/
-drone_ws/monitor_bugs.py
-drone_ws/start_test.sh
+# Databases, Bags & SLAM Data
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+*.db3
+*.mcap
+*.bag
+*.pcd
+*.ply
+rtabmap.db
 
-# IDE and OS
+# Binaries, Packages & Compiled Code
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.deb
+*.tar.gz
+ros-jazzy-rtabmap-launch_*.deb
+
+# Temporary Files, Logs & Local Backups
+backups/
+backups/*
+*.log
+sim_run.log
+monitor_bugs.py
+start_test.sh
+find_comments.py
+
+# Editor, IDE & AI Agent Workspace Files
+.claude/
 .vscode/
 .idea/
+.project
+.pydevproject
+.settings/
 *.swp
+*.swo
 *~
 .DS_Store
+.DS_Store?
+._*
+.cache/

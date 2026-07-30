@@ -3,8 +3,10 @@ import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                            TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,9 +46,15 @@ def generate_launch_description():
     sim_launch = os.path.join(pkg_drone_sim, 'launch', 'sim.launch.py')
     slam_launch = os.path.join(pkg_drone_sim, 'launch', 'slam.launch.py')
 
+    # Passed through to sim.launch.py's own 'gui' argument (default false).
+    gui_arg = DeclareLaunchArgument(
+        'gui', default_value='false',
+        description='Launch Gazebo with its GUI client instead of headless.')
+
     # 1) Gazebo (world, drone, sensors, /clock broadcast)
     gazebo = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(sim_launch)
+        PythonLaunchDescriptionSource(sim_launch),
+        launch_arguments={'gui': LaunchConfiguration('gui')}.items(),
     )
 
     # 2) ros_gz bridge (GZ -> ROS). Exact same topic mappings as the command
@@ -73,6 +81,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        gui_arg,
         gazebo,
         TimerAction(period=5.0, actions=[bridge]),
         TimerAction(period=8.0, actions=[slam]),

@@ -2,7 +2,9 @@ import os
 import sys
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import LaunchConfiguration
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from world_config import WORLD_PACKAGE, WORLD_FILE  # noqa: E402
@@ -35,19 +37,37 @@ def generate_launch_description():
     else:
         os.environ['GZ_CONFIG_PATH'] = "/usr/share/gz"
 
-    # Gazebo Sim Launch (executing 'gz sim' directly using ExecuteProcess)
-    # Headless (2026-07-09, user request): '-s' never starts the GUI
-    # client (~1.3GB VRAM savings - this machine only has 4GB VRAM,
-    # Gazebo GUI+server combined were consuming almost all of it).
-    # We don't watch the Gazebo window anyway, RViz + logs are enough.
-    # '--headless-rendering' ensures that even without a GUI, camera/depth
-    # sensors (D435) continue to be offscreen rendered on the server side -
-    # sensor data/quality is not affected, only the interactive 3D view is lost.
-    gz_sim = ExecuteProcess(
+    # Headless by DEFAULT (2026-07-09, user request): '-s' never starts the
+    # GUI client (~1.3GB VRAM savings - this machine only has 4GB VRAM,
+    # Gazebo GUI+server combined were consuming almost all of it). Exposed
+    # as a launch argument (2026-07-30, user request) rather than hardcoded,
+    # so an occasional GUI run ('gui:=true') doesn't require editing this
+    # file - default stays headless, so every existing invocation and this
+    # file's own past VRAM reasoning are unaffected unless gui is requested.
+    # '--headless-rendering' still applies in the headless branch only:
+    # camera/depth sensors are offscreen-rendered on the server side
+    # regardless, so sensor data/quality never depends on this flag - it
+    # only controls whether the interactive 3D view exists.
+    gui_arg = DeclareLaunchArgument(
+        'gui', default_value='false',
+        description='Launch Gazebo with its interactive GUI client instead '
+                    'of headless. Uses more VRAM (see comment above) - this '
+                    'machine has 4GB total, verify headroom with nvidia-smi '
+                    'before enabling alongside the full RViz/rtabmap stack.')
+
+    gz_sim_headless = ExecuteProcess(
         cmd=['gz', 'sim', '-s', '-r', '--headless-rendering', world_file],
-        output='screen'
+        output='screen',
+        condition=UnlessCondition(LaunchConfiguration('gui')),
+    )
+    gz_sim_gui = ExecuteProcess(
+        cmd=['gz', 'sim', '-r', world_file],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('gui')),
     )
 
     return LaunchDescription([
-        gz_sim
+        gui_arg,
+        gz_sim_headless,
+        gz_sim_gui,
     ])
