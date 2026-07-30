@@ -43,7 +43,8 @@ from nav_msgs.msg import Path
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
-from theta_star_grid import OccupancyGrid2D, theta_star, world_to_cell
+from theta_star_grid import (FAIL_SEARCH_EXHAUSTED, FAIL_START_ENCLOSED,
+                             OccupancyGrid2D, theta_star, world_to_cell)
 
 # "Latched topic" profile (ROS1 latching equivalent). The target chain
 # (NBV -> here -> local planner) publishes ONLY on change; a late subscriber
@@ -72,6 +73,31 @@ LATCHED_QOS = QoSProfile(
 # paying the full 3-attempt cost, a single 154s freeze. 2 keeps one
 # genuine retry while cutting ~3s off every dead candidate.
 UNREACHABLE_FAIL_THRESHOLD = 2
+
+# --- Sealed-pocket escape (2026-07-30 deadlock) -----------------------------
+# A wedged drone can end up in a spot where inflation seals every exit: the
+# live probe measured its reachable component at 19 cells (0.8 m^2) with
+# inflation_radius_m=0.55, while the SAME cloud at 0.45 opened the entire
+# 8000 m^2 warehouse. Every goal then fails identically and forever - the
+# stack sat dead for 10+ minutes with healthy VO and no crash.
+#
+# A component smaller than this is not "a hard map", it is a coffin: no
+# amount of blacklisting frontiers can help, because the drone cannot reach
+# ANY of them. 400 cells = 16 m^2 at 0.2m resolution - comfortably above the
+# tight-but-workable corridors the drone legitimately flies through, far
+# above the 19 cells actually observed.
+SEALED_COMPONENT_CELLS = 400
+# Consecutive unreachable REPORTS (across different goals) that indicate a
+# systemic problem rather than a run of genuinely dead frontiers. Purely a
+# loud diagnostic - the escape above is the actual remedy.
+SYSTEMIC_FAILURE_REPORTS = 8
+# Inflation used ONLY to compute an escape path out of a sealed pocket.
+# Chosen below the 0.45 connectivity cliff measured live. This does NOT
+# weaken real collision protection: the local planner's own APF repulsion
+# (min_safe_distance 0.5, influence_radius 1.0) and the raw depth-image
+# forward guard (0.7m hard stop) are untouched and still fly the path. The
+# alternative to a slightly-tighter clearance here is remaining entombed.
+ESCAPE_INFLATION_M = 0.30
 
 # Goal-change detection epsilon (m): NBV voxel targets differ by >= one
 # 0.2m voxel, so anything materially smaller works.
@@ -170,15 +196,27 @@ class ThetaStarPlanner(Node):
         self.start_snap_radius_cells = p('start_snap_radius_cells').value
         self.goal_snap_radius_m = p('goal_snap_radius_m').value
 
+        # Kept on self as well: the sealed-pocket escape rebuilds a grid from
+        # the same cloud at a different inflation and logs both radii.
+        self.inflation_radius_m = p('inflation_radius_m').value
         self.grid = OccupancyGrid2D(
             resolution=p('grid_resolution').value,
-            inflation_radius_m=p('inflation_radius_m').value,
+            inflation_radius_m=self.inflation_radius_m,
             projection_z_min=p('projection_z_min').value,
             projection_z_max=p('projection_z_max').value)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        self._last_points = None        # (N,3) raw cloud, for escape replan
+        # Inflation the CURRENT path was planned at: None = the normal grid,
+        # ESCAPE_INFLATION_M = a sealed-pocket escape path.
+        self._path_inflation_m = None
+        # Consecutive UNREACHABLE REPORTS across DIFFERENT goals (fail_counter
+        # below only counts retries of the SAME goal and resets on every new
+        # one, so it can never see a systemic failure). Used purely to
+        # escalate logging - the sealed-component check is the real trigger.
+        self.consecutive_unreachable = 0
         self.nbv_goal = None            # np.array([x, y, z]) - full 3D goal
         self.current_path = None        # list of np.array([x, y]) - 2D
         self._path_goal = None          # goal current_path was planned FOR
@@ -190,8 +228,17 @@ class ThetaStarPlanner(Node):
         # arrival-check (see do_replan/advance_and_publish for why).
         self._pending_fresh_publish = False
 
+        # LATCHED_QOS, not a bare depth-1 (2026-07-30): rtabmap publishes the
+        # obstacle cloud TRANSIENT_LOCAL and only republishes when the map
+        # actually changes. A VOLATILE subscriber therefore receives NOTHING
+        # while the drone is stationary - including, critically, on startup
+        # or after a node restart, leaving this planner with a permanently
+        # empty grid. Matching durability retrieves the retained cloud
+        # immediately. (Verified live: `ros2 topic info --verbose` reports
+        # RELIABLE/TRANSIENT_LOCAL on the publisher.)
         self.create_subscription(
-            PointCloud2, p('obstacle_topic').value, self.obstacle_callback, 1)
+            PointCloud2, p('obstacle_topic').value, self.obstacle_callback,
+            LATCHED_QOS)
         self.create_subscription(
             PoseStamped, p('nbv_goal_topic').value, self.goal_callback,
             LATCHED_QOS)
@@ -220,6 +267,10 @@ class ThetaStarPlanner(Node):
         else:
             pts = np.stack(
                 [raw['x'], raw['y'], raw['z']], axis=-1).astype(np.float64)
+        # Retained for the sealed-pocket escape replan, which must re-inflate
+        # the SAME cloud at a smaller radius (the grid keeps only inflated
+        # keys, so the raw points cannot be recovered from it).
+        self._last_points = pts
         self.grid.update_from_points(pts)
         self._invalidate_path_if_blocked()
 
@@ -261,10 +312,26 @@ class ThetaStarPlanner(Node):
         remaining = self.current_path[self.path_index:]
         if len(remaining) == 0:
             return
+
+        # An escape path is deliberately routed through gaps that the NORMAL
+        # inflation seals - validating it against the normal grid would
+        # discard it on the very next cloud callback, replan, fail, escape
+        # again, and loop forever without the drone ever moving. Check it at
+        # the clearance it was actually planned for, so a REAL obstacle still
+        # invalidates it (contract preserved) while mere inflation does not.
+        check_grid = self.grid
+        if self._path_inflation_m is not None and self._last_points is not None:
+            check_grid = OccupancyGrid2D(
+                resolution=self.grid.resolution,
+                inflation_radius_m=self._path_inflation_m,
+                projection_z_min=self.grid.projection_z_min,
+                projection_z_max=self.grid.projection_z_max)
+            check_grid.update_from_points(self._last_points)
+
         cells = np.array(
-            [world_to_cell(wp, self.grid.resolution) for wp in remaining],
+            [world_to_cell(wp, check_grid.resolution) for wp in remaining],
             dtype=np.int64)
-        if np.any(self.grid.is_blocked(cells)):
+        if np.any(check_grid.is_blocked(cells)):
             self.get_logger().warn(
                 'Followed path invalidated by new obstacle data - '
                 'path cleared, replan triggered.',
@@ -272,6 +339,68 @@ class ThetaStarPlanner(Node):
             self.current_path = None
             self.path_index = 0
             self.do_replan(force=True)
+
+    def _try_escape_sealed_pocket(self, pose, info):
+        """If the drone is sealed inside an inflation pocket, replan the SAME
+        goal on a temporarily de-inflated grid. Returns a path or None.
+
+        Fires only on the two START-side failures, never on a goal-side one,
+        so an ordinary out-of-reach frontier can't silently relax clearance
+        during normal exploration.
+        """
+        if self._last_points is None:
+            return None
+
+        reason = info.get('reason')
+        if reason == FAIL_SEARCH_EXHAUSTED:
+            # The drained open list already measured the component for free:
+            # every cell reachable from the start got expanded into `closed`.
+            # No separate flood fill needed.
+            component = info.get('closed_cells', 0)
+            if component >= SEALED_COMPONENT_CELLS:
+                return None  # a hard map, not a coffin - leave it alone
+            area = component * (self.grid.resolution ** 2)
+            detail = f'only {component} free cells (~{area:.1f} m^2) reachable'
+        elif reason == FAIL_START_ENCLOSED:
+            # Own cell blocked AND nothing free within the snap radius. This
+            # is sealed by definition - no measurement needed (and none is
+            # possible: there is no free start cell to flood from).
+            snap_m = self.start_snap_radius_cells * self.grid.resolution
+            detail = f'own cell blocked, nothing free within {snap_m:.1f}m'
+        else:
+            return None
+
+        self.get_logger().error(
+            f'SEALED POCKET: {detail} at inflation '
+            f'{self.inflation_radius_m:.2f}m - no goal anywhere is reachable. '
+            f'Retrying at escape inflation {ESCAPE_INFLATION_M:.2f}m.')
+
+        escape_grid = OccupancyGrid2D(
+            resolution=self.grid.resolution,
+            inflation_radius_m=ESCAPE_INFLATION_M,
+            projection_z_min=self.grid.projection_z_min,
+            projection_z_max=self.grid.projection_z_max)
+        escape_grid.update_from_points(self._last_points)
+
+        escape_info = {}
+        path = theta_star(
+            escape_grid, pose[:2], self.nbv_goal[:2],
+            self.max_search_iterations,
+            start_snap_radius_cells=self.start_snap_radius_cells,
+            goal_snap_radius_m=self.goal_snap_radius_m,
+            info=escape_info)
+        if path is None:
+            self.get_logger().error(
+                'Escape replan ALSO failed '
+                f'({escape_info.get("reason", "unknown")}) - the drone is '
+                'physically trapped, not merely over-inflated. Local '
+                'planner recovery (contact-creep / pose-sanity) must free it.')
+            return None
+
+        self.get_logger().warn(
+            f'ESCAPE PATH FOUND: {len(path)} waypoints at reduced inflation. '
+            'APF repulsion and the depth guard still enforce real clearance.')
+        return path
 
     def do_replan(self, force=False):
         if self.nbv_goal is None:
@@ -315,11 +444,23 @@ class ThetaStarPlanner(Node):
                 'Waiting for TF, skipping replan...', throttle_duration_sec=5.0)
             return
 
+        info = {}
         path = theta_star(
             self.grid, pose[:2], self.nbv_goal[:2],
             self.max_search_iterations,
             start_snap_radius_cells=self.start_snap_radius_cells,
-            goal_snap_radius_m=self.goal_snap_radius_m)
+            goal_snap_radius_m=self.goal_snap_radius_m,
+            info=info)
+
+        # Before treating a failure as "this frontier is out of reach",
+        # check whether the DRONE is the problem. A sealed start component
+        # makes every goal unreachable, so blacklisting frontiers one by one
+        # can never recover - it just burns the map down a cell at a time.
+        used_escape = False
+        if path is None and info.get('reason') in (
+                FAIL_START_ENCLOSED, FAIL_SEARCH_EXHAUSTED):
+            path = self._try_escape_sealed_pocket(pose, info)
+            used_escape = path is not None
 
         if path is None:
             # NEVER forward the raw NBV goal (that would resurrect the
@@ -330,7 +471,10 @@ class ThetaStarPlanner(Node):
             self.fail_counter += 1
             self.get_logger().warn(
                 f'Theta* planning failed ({self.fail_counter}/'
-                f'{UNREACHABLE_FAIL_THRESHOLD}): no valid path to '
+                f'{UNREACHABLE_FAIL_THRESHOLD}): '
+                f'{info.get("reason", "unknown")} '
+                f'(component={info.get("closed_cells", "n/a")} cells), '
+                f'no valid path to '
                 f'({self.nbv_goal[0]:.2f}, {self.nbv_goal[1]:.2f}).',
                 throttle_duration_sec=3.0)
             if self.fail_counter == UNREACHABLE_FAIL_THRESHOLD:
@@ -342,11 +486,31 @@ class ThetaStarPlanner(Node):
                 msg.pose.position.z = float(self.nbv_goal[2])
                 msg.pose.orientation.w = 1.0
                 self.unreachable_pub.publish(msg)
+                self.consecutive_unreachable += 1
                 self.get_logger().warn(
-                    'Goal reported unreachable - NBV will blacklist it.')
+                    'Goal reported unreachable - NBV will blacklist it '
+                    f'(consecutive: {self.consecutive_unreachable}).')
+                # Systemic-failure alarm. fail_counter cannot detect this on
+                # its own - it resets on every new goal, so a drone that
+                # fails EVERY goal forever looks identical to one that keeps
+                # meeting fresh dead frontiers. 2026-07-30: ~100 consecutive
+                # unreachable reports over 10 minutes with the drone sealed
+                # in place and nothing in the logs saying so.
+                if self.consecutive_unreachable == SYSTEMIC_FAILURE_REPORTS:
+                    self.get_logger().error(
+                        f'{self.consecutive_unreachable} goals unreachable in '
+                        'a row across scattered targets - this is a STUCK '
+                        'DRONE, not a hard map. The sealed-pocket escape has '
+                        'not freed it; local planner recovery is required.')
             return
 
         self.fail_counter = 0
+        # Any successful plan (normal OR escape) means the drone is routable
+        # again - the systemic-failure streak is over.
+        self.consecutive_unreachable = 0
+        # Remember which clearance this path was planned at, so
+        # _invalidate_path_if_blocked judges it on its own terms.
+        self._path_inflation_m = ESCAPE_INFLATION_M if used_escape else None
         self.current_path = path
         self._path_goal = self.nbv_goal.copy()
         # path[0] is the drone's own (snapped) start cell - it can sit just

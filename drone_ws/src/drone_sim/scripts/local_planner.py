@@ -27,6 +27,7 @@ waypoint with the goal's z; the attractive force here closes that z error
 gradually along the route.
 """
 import math
+from collections import deque
 
 import numpy as np
 import rclpy
@@ -148,6 +149,40 @@ class LocalPlanner(Node):
         # rotate - rotation is what a wedge/wall blocks"). No rearward
         # sensor exists, so kept deliberately gentle.
         self.declare_parameter('depth_guard_reverse_speed', 0.25)
+        # --- Contact-creep detector (2026-07-30) --------------------------
+        # A drone wedged against geometry slides slowly UP it: ground truth
+        # rose a metronomic ~1.8mm/s while xy stayed frozen to the
+        # millimetre, three separate incidents this month. The absolute
+        # z-envelope guard above cannot catch it, because believed z lags
+        # true z by a persistent offset (measured -0.55m: true 2.55m read as
+        # 2.00m, i.e. "sane"). The RATE + frozen-xy signature is immune to
+        # that bias, which is what makes it the reliable detector.
+        #
+        # Thresholds are deliberately far outside anything legitimate: no
+        # real manoeuvre holds xy inside 15cm for a full minute while
+        # gaining 25cm of altitude. A turn-then-go rotate-in-place freezes
+        # xy but completes in seconds, and a commanded climb moves xy before
+        # and after it.
+        # Window/threshold are sized against the MEASURED creep rate of
+        # ~1.8mm/s: over 90s that is a 0.162m rise, so a 0.12m threshold
+        # trips with ~35% margin while ignoring anything slower than
+        # ~1.3mm/s. (An earlier 60s/0.25m pairing was verified offline to
+        # be incapable of ever firing on the real incident - 60s x 1.8mm/s
+        # is only 0.108m. Do not raise creep_z_rise_m without lengthening
+        # creep_window_sec to match.)
+        self.declare_parameter('creep_window_sec', 90.0)
+        self.declare_parameter('creep_xy_tolerance_m', 0.15)
+        self.declare_parameter('creep_z_rise_m', 0.12)
+        # Fraction of the rise threshold that must ALSO appear in the most
+        # recent half of the window. Contact creep is continuous, so half a
+        # window carries ~half the rise; a drone that climbed once and then
+        # parked (xy frozen, altitude flat) carries ~none. Without this the
+        # detector fires on any completed climb followed by a long hover.
+        self.declare_parameter('creep_sustain_fraction', 0.35)
+        # How long one escape burst (descend + back out) is commanded before
+        # re-evaluating. Long enough to physically unstick, short enough that
+        # a false positive costs little.
+        self.declare_parameter('creep_escape_sec', 4.0)
         self.declare_parameter(
             'depth_topic',
             '/world/depot/model/drone/model/d455/link/link/sensor/'
@@ -210,6 +245,14 @@ class LocalPlanner(Node):
         self.geofence_recovery_speed = p('geofence_recovery_speed').value
         self.depth_guard_stop_m = p('depth_guard_stop_m').value
         self.depth_guard_reverse_speed = p('depth_guard_reverse_speed').value
+        self.creep_window_sec = p('creep_window_sec').value
+        self.creep_xy_tolerance_m = p('creep_xy_tolerance_m').value
+        self.creep_z_rise_m = p('creep_z_rise_m').value
+        self.creep_sustain_fraction = p('creep_sustain_fraction').value
+        self.creep_escape_sec = p('creep_escape_sec').value
+        # (t_sec, x, y, z) samples spanning at most creep_window_sec.
+        self._creep_history = deque()
+        self._creep_escape_until = None
         self.map_frame = p('map_frame').value
         self.base_frame = p('base_frame').value
         self.odom_cov_threshold = p('odom_cov_threshold').value
@@ -334,6 +377,46 @@ class LocalPlanner(Node):
             self.grace_until_sec = (
                 self.get_clock().now().nanoseconds / 1e9
                 + self.recovery_grace_sec)
+
+    def detect_contact_creep(self, now_sec, pose_xyz):
+        """True iff the drone has been xy-frozen while gaining altitude for a
+        full creep_window_sec - the signature of being wedged against
+        geometry and sliding up it.
+
+        Deliberately rate-based rather than absolute-altitude based: the
+        believed z carries a persistent offset from truth (-0.55m measured
+        live), so the z-envelope guard reads a wedged drone at true 2.55m as
+        a perfectly sane 2.00m. Relative rise over a window is unaffected by
+        a constant bias.
+        """
+        hist = self._creep_history
+        hist.append((now_sec, pose_xyz[0], pose_xyz[1], pose_xyz[2]))
+        while hist and now_sec - hist[0][0] > self.creep_window_sec:
+            hist.popleft()
+
+        # Need a full window before judging, else a brief hover trips it.
+        if len(hist) < 2 or now_sec - hist[0][0] < self.creep_window_sec:
+            return False
+
+        t0, x0, y0, z0 = hist[0]
+        # Max xy excursion anywhere in the window, not just first-vs-last: a
+        # drone that flew away and happened to return would otherwise look
+        # frozen.
+        max_xy = max(math.hypot(x - x0, y - y0) for _, x, y, _ in hist)
+        if max_xy >= self.creep_xy_tolerance_m:
+            return False
+
+        z_now = pose_xyz[2]
+        if z_now - z0 <= self.creep_z_rise_m:
+            return False
+
+        # SUSTAINED, not merely net: contact creep keeps rising for the whole
+        # window, whereas a completed climb followed by a parked hover shows
+        # its entire gain in the first half and none afterwards. Comparing
+        # only the window endpoints cannot tell those apart.
+        t_mid = t0 + (now_sec - t0) / 2.0
+        z_mid = next((z for t, _, _, z in hist if t >= t_mid), z0)
+        return (z_now - z_mid) > self.creep_z_rise_m * self.creep_sustain_fraction
 
     def publish_recovery_twist(self):
         """Hover; after recovery_stall_threshold, add a slow in-place yaw
@@ -566,6 +649,39 @@ class LocalPlanner(Node):
             self.clear_recovery(
                 'Pose estimate back inside the sane envelope - '
                 'continuing to target')
+
+        # 2b-2. CONTACT CREEP (wedged-against-geometry escape) --------------
+        # Runs unconditionally per tick, like every layer above it: the
+        # incidents this catches all happened while the drone was PARKED on
+        # a latched goal-reached flag, which is exactly the state that used
+        # to skip the safety layers entirely (lesson 19).
+        creep_now = self.get_clock().now().nanoseconds / 1e9
+        if self._creep_escape_until is not None:
+            if creep_now < self._creep_escape_until:
+                twist = Twist()
+                twist.linear.z = -self.geofence_recovery_speed  # undo the slide
+                twist.linear.x = -self.depth_guard_reverse_speed  # back out
+                self.cmd_vel_pub.publish(twist)
+                return
+            self._creep_escape_until = None
+            self.get_logger().info(
+                'Contact-creep escape burst finished - resuming normal '
+                'control and re-arming the detector.')
+        elif self.detect_contact_creep(creep_now, pose_xyz):
+            t0, x0, y0, z0 = self._creep_history[0]
+            self.get_logger().error(
+                f'CONTACT CREEP: xy pinned within '
+                f'{self.creep_xy_tolerance_m:.2f}m for '
+                f'{self.creep_window_sec:.0f}s while believed z rose '
+                f'{pose_xyz[2] - z0:+.2f}m ({z0:.2f} -> {pose_xyz[2]:.2f}). '
+                'The drone is wedged against geometry and sliding up it - '
+                'descending and backing out.')
+            self._creep_escape_until = creep_now + self.creep_escape_sec
+            # Clear the window so the next evaluation judges post-escape
+            # motion only, instead of instantly re-triggering on the stale
+            # frozen samples that are still in the deque.
+            self._creep_history.clear()
+            return
 
         # 2c. POST-RECOVERY GRACE HOVER -------------------------------------
         now_sec = self.get_clock().now().nanoseconds / 1e9

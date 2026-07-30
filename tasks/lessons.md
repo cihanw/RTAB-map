@@ -621,3 +621,65 @@ what sits below every `return` in a safety-relevant loop; guards that
 must ALWAYS run belong above every conditional exit, no matter how
 innocent the gate above them looks ("we're parked, nothing to do" was
 exactly the state in which the drone drifted 4 meters).**
+
+## 20. Inflation sealed the drone into a 0.8 m² coffin; every goal failed identically (2026-07-30)
+
+**What happened:** drone completely frozen ~10 minutes. All 11 processes
+alive, VO perfect (cov 0.0000, `lost=false`, hundreds of inliers), no
+crash. `local_planner` had latched "Target reached" and gone silent for
+447s while NBV/Theta* churned behind it: ~100 consecutive goals, all
+"no valid path", at targets scattered across the whole map.
+
+**The wrong hypothesis (nearly implemented).** Uniform failure + the
+drone having crept above `projection_z_max=1.5` looked conclusive: the
+planner had stopped modelling the world the drone was in. A live
+read-only probe **refuted it** - raising the ceiling to 3.0 changed
+nothing (still 0/5 goals). Had I skipped the probe I'd have shipped a
+fix for a non-bug.
+
+**Actual root cause,** from driving the real `theta_star_grid` against
+the live latched cloud at the frozen pose:
+
+| `inflation_radius_m` | reachable free space | goals solved |
+|---|---|---|
+| **0.55 (live)** | **19 cells = 0.8 m²** | **0/5** |
+| 0.45 | whole map (~8000 m²) | 1/5 |
+| 0.25 | whole map | 4/5 |
+
+Contact-creep wedged the drone into a spot where 0.55m inflation sealed
+every exit. There is a **cliff between 0.55 and 0.45**: one side is a
+coffin, the other the entire warehouse. Theta* snapped the start out of
+the blocked cell successfully - but into the *same* sealed pocket - then
+ran a real search to exhaustion. Blacklisting frontiers can never fix
+this; it just burns the map down one cell at a time.
+
+**Fixes:** (1) `theta_star` now reports WHY it failed via an `info` dict
+(`start-enclosed` / `goal-enclosed` / `search-exhausted` /
+`iteration-cap`) - previously all four were one bare `return None`.
+(2) On a start-side failure with a component under `SEALED_COMPONENT_CELLS`,
+replan once at `ESCAPE_INFLATION_M=0.30`; APF repulsion and the depth
+guard still fly it. A drained open list already counts the component in
+`closed`, so this costs no extra search. (3) Escape paths are validated
+against their OWN inflation - checking them against the normal grid
+discards them instantly and loops forever. (4) Contact-creep detector in
+local_planner: xy pinned <0.15m for 90s while z rises >0.12m.
+(5) Obstacle subscription -> TRANSIENT_LOCAL to match the publisher.
+
+**Two bugs my own offline tests caught before they shipped:** the creep
+thresholds (60s/0.25m) were mathematically incapable of ever firing on
+the real 1.8mm/s rate (60s x 1.8mm/s = 0.108m < 0.25m), and comparing
+only window endpoints fired on any completed climb followed by a hover -
+fixed by requiring a *sustained* rise across both halves of the window.
+
+**Rule 1: when a failure is perfectly uniform across varied inputs, the
+shared term is the suspect - here the START, not the goals. Measure the
+reachable set before theorising about why individual targets fail.**
+
+**Rule 2: a safety margin large enough to seal the robot in is not a
+safety margin. Any hard clearance constant needs an escape hatch for the
+case where it, and not the world, is what makes the problem infeasible.**
+
+**Rule 3: verify a root-cause hypothesis against the live system before
+implementing it. The z-band theory fit every observation and was still
+wrong; one read-only probe cost minutes and saved shipping a fix that
+would have changed nothing while the real deadlock stayed.**

@@ -35,6 +35,17 @@ NEIGHBOR_OFFSETS_8 = np.array(
      if not (dx == 0 and dy == 0)],
     dtype=np.int64)
 
+# theta_star() failure reasons, written into its optional `info` dict.
+# Added 2026-07-30: these four outcomes previously ALL surfaced as a bare
+# `return None` logged as "no valid path", which made a 10-minute deadlock
+# indistinguishable from an ordinary out-of-reach frontier and cost a full
+# live-probe investigation to tell apart. They are genuinely different
+# faults and the caller reacts differently to each.
+FAIL_START_ENCLOSED = 'start-enclosed'       # own cell blocked, snap failed
+FAIL_GOAL_ENCLOSED = 'goal-enclosed'         # goal walled in (usually benign)
+FAIL_SEARCH_EXHAUSTED = 'search-exhausted'   # open list emptied = SEALED
+FAIL_ITERATION_CAP = 'iteration-cap'         # hit max_iterations, map is big
+
 
 def cell_keys(coords):
     """Packs (N,2) int cell coordinates into sortable (N,) int64 keys."""
@@ -238,7 +249,7 @@ def _reconstruct_and_simplify(parent, goal_cell, grid):
 
 
 def theta_star(grid, start_xy_world, goal_xy_world, max_iterations,
-               start_snap_radius_cells=3, goal_snap_radius_m=0.4):
+               start_snap_radius_cells=3, goal_snap_radius_m=0.4, info=None):
     """2D Theta* (Nash et al. 2007, 8-connected).
 
     Returns a list of (x, y) world-frame waypoints, or None if no path.
@@ -249,17 +260,29 @@ def theta_star(grid, start_xy_world, goal_xy_world, max_iterations,
     (0.5): if the snapped path end sat farther than that from the true NBV
     target, NBV would never detect arrival and would hold the same target
     forever - a subtle deadlock verified by analysis of the 3D version.
+
+    `info`: optional dict. On failure it receives 'reason' (one of the
+    FAIL_* constants) and, where meaningful, 'closed_cells' / 'start_cell'.
+    The caller needs this to tell a sealed-in drone (systemic, needs
+    recovery) from an unreachable frontier (routine, just blacklist it).
     """
     resolution = grid.resolution
     start = world_to_cell(start_xy_world, resolution)
     goal = world_to_cell(goal_xy_world, resolution)
+
+    def fail(reason, **extra):
+        if info is not None:
+            info['reason'] = reason
+            info['start_cell'] = start
+            info.update(extra)
+        return None
 
     if grid.is_blocked_single(start):
         # Transient: the drone's own cell can read blocked right after an
         # inflation update. Small bounded escape, else hard failure.
         start = nearest_free_cell(grid, start, start_snap_radius_cells)
         if start is None:
-            return None
+            return fail(FAIL_START_ENCLOSED)
 
     if grid.is_blocked_single(goal):
         # Frontier goals legitimately land inside inflation near walls -
@@ -267,7 +290,7 @@ def theta_star(grid, start_xy_world, goal_xy_world, max_iterations,
         goal_snap_cells = max(1, int(round(goal_snap_radius_m / resolution)))
         goal = nearest_free_cell(grid, goal, goal_snap_cells)
         if goal is None:
-            return None  # genuinely enclosed/unreachable
+            return fail(FAIL_GOAL_ENCLOSED)  # genuinely enclosed/unreachable
 
     g_score = {start: 0.0}
     parent = {start: start}
@@ -315,4 +338,11 @@ def theta_star(grid, start_xy_world, goal_xy_world, max_iterations,
                     tentative_g + _heuristic(neighbor, goal) * resolution,
                     counter, neighbor))
 
-    return None  # no path / iteration cap hit (both feed the same fail path)
+    # An EMPTY open list means the search drained every cell reachable from
+    # the start and never found the goal - the start's connected component
+    # is closed. Hitting the iteration cap instead means the map is merely
+    # large. Conflating these is what hid the 2026-07-30 sealed-pocket
+    # deadlock; len(closed) tells the caller how big that component was.
+    if not open_heap:
+        return fail(FAIL_SEARCH_EXHAUSTED, closed_cells=len(closed))
+    return fail(FAIL_ITERATION_CAP, closed_cells=len(closed))
