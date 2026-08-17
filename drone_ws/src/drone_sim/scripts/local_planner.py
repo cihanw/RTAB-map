@@ -183,6 +183,39 @@ class LocalPlanner(Node):
         # re-evaluating. Long enough to physically unstick, short enough that
         # a false positive costs little.
         self.declare_parameter('creep_escape_sec', 4.0)
+        # PHYSICAL CORROBORATION (2026-08-05). The signature above is read
+        # from BELIEVED z, which cannot distinguish "sliding up a wall" from
+        # "hovering while VO drifts upward" - both are xy-frozen with a
+        # rising z. Measured during a false-positive incident: ground truth z
+        # was flat/falling (0.689 -> 0.579) while believed z rose 0.13 ->
+        # 0.21, and the escape burst (-0.25m/s in x for 4s) fired every ~94s,
+        # walking an IDLE drone ~16m across the map.
+        # A genuinely wedged drone is by definition touching geometry, so
+        # require the depth sensor to agree before acting. Looser than
+        # depth_guard_stop_m (0.7) on purpose: a wedge that the depth guard
+        # already halted still sits inside this radius, but open space - where
+        # every observed false firing happened - never does.
+        self.declare_parameter('creep_contact_depth_m', 1.0)
+        # --- Station keeping (2026-08-05) ---------------------------------
+        # Publishing a bare Twist() to hold position means "zero velocity" to
+        # MulticopterVelocityControl, which is a PD controller with NO
+        # integral term (velocityGain/attitudeGain/angularRateGain - no I).
+        # Any residual thrust/weight imbalance therefore settles at a
+        # constant velocity error it structurally cannot null out. Measured
+        # idle with cmd_vel all-zero throughout: ground truth z climbed
+        # 0.813 -> 1.436m over 6 minutes (~1.8mm/s), until believed z left
+        # pose_sane_z_max and the sanity layer began fighting it in a limit
+        # cycle (odom pinned oscillating 1.974-2.011 around exactly 2.00).
+        # Holding altitude closed-loop removes the whole class of problem;
+        # matching the model's mass exactly would not, since the drift
+        # returns with any payload/drag change.
+        self.declare_parameter('station_keep_gain', 0.8)
+        # Deliberately below geofence_recovery_speed (0.3) so a genuine
+        # geofence or pose-sanity event still dominates this gentle hold.
+        self.declare_parameter('station_keep_max_speed', 0.2)
+        # Below this error the drone is considered settled and a true zero
+        # is published, rather than perpetual micro-corrections.
+        self.declare_parameter('station_keep_deadband_m', 0.03)
         self.declare_parameter(
             'depth_topic',
             '/world/depot/model/drone/model/d455/link/link/sensor/'
@@ -250,6 +283,12 @@ class LocalPlanner(Node):
         self.creep_z_rise_m = p('creep_z_rise_m').value
         self.creep_sustain_fraction = p('creep_sustain_fraction').value
         self.creep_escape_sec = p('creep_escape_sec').value
+        self.creep_contact_depth_m = p('creep_contact_depth_m').value
+        self.station_keep_gain = p('station_keep_gain').value
+        self.station_keep_max_speed = p('station_keep_max_speed').value
+        self.station_keep_deadband_m = p('station_keep_deadband_m').value
+        # Believed z latched when station keeping begins; None = not holding.
+        self._hold_altitude = None
         # (t_sec, x, y, z) samples spanning at most creep_window_sec.
         self._creep_history = deque()
         self._creep_escape_until = None
@@ -338,6 +377,10 @@ class LocalPlanner(Node):
                                       msg.pose.position.y,
                                       msg.pose.position.z])
         self.goal_reached = False
+        # Drop the latched hold altitude: the next station-keeping entry must
+        # latch wherever the drone actually ends up, not snap back to where it
+        # was parked before this goal.
+        self._hold_altitude = None
         self.get_logger().info(
             f'New target received: ({self.current_goal[0]:.2f}, '
             f'{self.current_goal[1]:.2f}, {self.current_goal[2]:.2f})')
@@ -358,6 +401,34 @@ class LocalPlanner(Node):
         silence = (self.get_clock().now()
                    - self.last_odom_time).nanoseconds / 1e9
         return silence <= self.odom_timeout_sec
+
+    def hold_station(self, pose_xyz):
+        """Publish a station-keeping command instead of a bare zero Twist.
+
+        Zero velocity is NOT position hold: the vehicle controller has no
+        integral term, so it drifts (see station_keep_gain). Latch the
+        altitude on first entry and close a small proportional loop on it.
+
+        xy is deliberately left uncommanded - measured horizontal drift while
+        idle is ~1e-13 m, so only z needs a loop, and adding an xy loop here
+        would risk fighting the APF the moment a goal arrives.
+
+        Holding on BELIEVED z is correct despite its persistent ~0.46m offset
+        from truth: a constant bias is irrelevant to a setpoint hold, exactly
+        as it already is when pursuing a goal.
+        """
+        if self._hold_altitude is None:
+            self._hold_altitude = pose_xyz[2]
+            self.get_logger().info(
+                f'Station keeping at believed z={self._hold_altitude:.2f}m.')
+
+        twist = Twist()
+        error = self._hold_altitude - pose_xyz[2]
+        if abs(error) > self.station_keep_deadband_m:
+            twist.linear.z = float(np.clip(
+                self.station_keep_gain * error,
+                -self.station_keep_max_speed, self.station_keep_max_speed))
+        self.cmd_vel_pub.publish(twist)
 
     def enter_recovery(self, reason, message):
         if not self.in_recovery or self.recovery_reason != reason:
@@ -388,8 +459,37 @@ class LocalPlanner(Node):
         live), so the z-envelope guard reads a wedged drone at true 2.55m as
         a perfectly sane 2.00m. Relative rise over a window is unaffected by
         a constant bias.
+
+        Two gates run BEFORE the signature is evaluated, because the
+        signature alone cannot separate a real wedge from odometry drift
+        (see creep_contact_depth_m):
+
+        1. No goal -> no wedge. Contact creep is a PURSUIT failure: the APF
+           drives the drone into geometry and it rides up. Parked on a plain
+           hover, xy-frozen is simply correct behaviour, not evidence.
+        2. Nothing close -> no wedge. Being wedged means touching something.
+
+        Both clear the history rather than merely returning False, so stale
+        frozen samples gathered while idle cannot fire the detector the
+        instant a goal arrives.
         """
         hist = self._creep_history
+
+        if self.current_goal is None:
+            hist.clear()
+            return False
+
+        # Same freshness rule the depth guard uses (see depth_guard_stop_m):
+        # a stale reading must not be treated as evidence either way.
+        depth_fresh = (
+            self.min_forward_depth_time is not None and
+            (self.get_clock().now()
+             - self.min_forward_depth_time).nanoseconds / 1e9 < 0.5)
+        if not (depth_fresh
+                and self.min_forward_depth < self.creep_contact_depth_m):
+            hist.clear()
+            return False
+
         hist.append((now_sec, pose_xyz[0], pose_xyz[1], pose_xyz[2]))
         while hist and now_sec - hist[0][0] > self.creep_window_sec:
             hist.popleft()
@@ -694,7 +794,7 @@ class LocalPlanner(Node):
 
         # 3. GOAL lifecycle (pursuit gates - AFTER all safety layers) --------
         if self.current_goal is None:
-            self.cmd_vel_pub.publish(Twist())
+            self.hold_station(pose_xyz)
             self.get_logger().info(
                 'Waiting for goal...', throttle_duration_sec=2.0)
             return
@@ -702,7 +802,7 @@ class LocalPlanner(Node):
         # a new goal message arrives. Without the latch, SLAM noise around
         # the threshold re-engaged APF and caused oscillation (live bug).
         if self.goal_reached:
-            self.cmd_vel_pub.publish(Twist())
+            self.hold_station(pose_xyz)
             return
 
         # 4. FORCES ---------------------------------------------------------

@@ -60,7 +60,23 @@
                      kept the same in this transition - the goal is to model
                      D455's embedded IMU (below), not to readjust the camera
                      optics; FOV change could be a separate, optional next step. -->
-                <update_rate>30</update_rate>
+                <!-- 30 -> 15 FPS (2026-08-05). MEASURED on the current stack:
+                     the camera published at 29.2Hz while rgbd_odometry only
+                     produced odometry at 11.5Hz - roughly 18 frames/s were
+                     rendered by Gazebo, serialised over DDS, then discarded.
+                     VO spends 58-86ms per frame (115% CPU, single-thread
+                     bound) against a 33ms budget at 30 FPS, so it can never
+                     keep up; the survivors reach it at irregular intervals,
+                     which is precisely what degrades odometry.
+                     15 FPS gives a 66ms budget that the measured cost fits,
+                     so nearly every frame is consumed with deterministic
+                     timing. NOTE this is not a quality cut: Vis/MaxFeatures
+                     stays at 2000, and at the planner's 0.6m/s speed cap
+                     15Hz still leaves only ~4cm between frames - ample
+                     overlap. More cores do not help: the bottleneck is
+                     single-threaded feature extraction, so the legacy
+                     "2000 features saturates VO" note still holds here. -->
+                <update_rate>15</update_rate>
                 <camera name="camera">
                     <!-- FOV 60 -> 87 deg RE-APPLIED (2026-07-12): briefly
                          reverted to 60 while chasing "behavior doesn't
