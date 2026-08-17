@@ -3,6 +3,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             TimerAction)
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -16,6 +17,14 @@ def generate_launch_description():
     gui_arg = DeclareLaunchArgument(
         'gui', default_value='true',
         description='Launch Gazebo with its GUI client. Set false for headless.')
+
+    # Natural-language control via a local LLM (drone_llm package).
+    # Default false so the stack behaves exactly as it always has unless asked:
+    # 'ros2 launch drone_sim autonomous.launch.py llm:=true'.
+    llm_arg = DeclareLaunchArgument(
+        'llm', default_value='false',
+        description='Start the local-LLM commander and route NBV goals '
+                    'through it. Requires an Ollama server (see drone_llm).')
 
     # Include the main bringup launch file (Gazebo, rtabmap, RViz, etc.)
     bringup_launch_path = os.path.join(pkg_drone_sim, 'launch', 'bringup.launch.py')
@@ -48,6 +57,17 @@ def generate_launch_description():
     )
 
     # NBV Planner: Selects the next best goal (Frontier) and sends it to theta_star_planner
+    #
+    # Two conditioned variants (same pattern as sim.launch.py's headless/gui
+    # split). nbv_planner.py hard-codes its output topic, so redirecting it is
+    # done with a launch remapping rather than a code change:
+    #
+    #   llm:=false  nbv -> /local_planner/current_target -> theta_star   (as always)
+    #   llm:=true   nbv -> /nbv/goal -> llm_bridge -> /local_planner/current_target
+    #
+    # Routing through the bridge is what lets a spoken command survive: NBV
+    # republishes a frontier goal every 2s (planning_period_sec) and would
+    # otherwise overwrite a user's destination almost immediately.
     nbv_planner = TimerAction(
         period=12.0,
         actions=[
@@ -56,7 +76,31 @@ def generate_launch_description():
                 executable='nbv_planner.py',
                 name='nbv_planner',
                 output='screen',
-                parameters=[{'use_sim_time': True}]
+                parameters=[{'use_sim_time': True}],
+                condition=UnlessCondition(LaunchConfiguration('llm')),
+            ),
+            Node(
+                package='drone_sim',
+                executable='nbv_planner.py',
+                name='nbv_planner',
+                output='screen',
+                parameters=[{'use_sim_time': True}],
+                remappings=[('/local_planner/current_target', '/nbv/goal')],
+                condition=IfCondition(LaunchConfiguration('llm')),
+            ),
+        ]
+    )
+
+    # LLM bridge: goal arbiter + natural-language command/telemetry interface.
+    # Started after the planners so its first telemetry snapshot has real data.
+    llm_bridge = TimerAction(
+        period=16.0,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(
+                    get_package_share_directory('drone_llm'),
+                    'launch', 'llm.launch.py')),
+                condition=IfCondition(LaunchConfiguration('llm')),
             )
         ]
     )
@@ -84,8 +128,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         gui_arg,
+        llm_arg,
         bringup,
         local_planner,
         nbv_planner,
-        theta_star_planner
+        theta_star_planner,
+        llm_bridge
     ])
