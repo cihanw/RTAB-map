@@ -18,7 +18,7 @@ def generate_launch_description():
         'gui', default_value='false',
         description='Launch Gazebo with its GUI client instead of headless.')
 
-    # Include the main bringup launch file (Gazebo, rtabmap, EKF, etc.)
+    # Include the main bringup launch file (Gazebo, rtabmap, RViz, etc.)
     bringup_launch_path = os.path.join(pkg_drone_sim, 'launch', 'bringup.launch.py')
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(bringup_launch_path),

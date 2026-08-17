@@ -23,8 +23,6 @@ def generate_launch_description():
     rtabmap_launch_path = os.path.join(
         get_package_share_directory('rtabmap_launch'), 'launch', 'rtabmap.launch.py'
     )
-    ekf_config_path = os.path.join(pkg_drone_sim, 'config', 'ekf.yaml')
-
     # Transformation between drone body (base_link) and camera's frame_id
     # (drone/d455/link/realsense_d455). Translation (0,0,0.15) is the physical
     # mount point (from camera_joint in model.sdf: d455 z=0.40 - x500 z=0.25 = 0.15).
@@ -86,26 +84,12 @@ def generate_launch_description():
     )
 
     # ============================================================
-    # EXPERIMENTAL CHANGE (2026-07-08, user request, TEMPORARY):
-    # EKF + standalone rgbd_odometry have been disabled, instead using
-    # rtabmap_launch.launch.py's OWN embedded visual odometry
-    # (visual_odometry:true, below) - IMU is still fed to it
-    # (via imu_topic). Goal: to live-compare whether the EKF layer
-    # (and the pose-jump/approval-mechanism defense it triggers) really
-    # brings a net benefit, or if it's just added complexity/risk.
-    # THE rgbd_odometry AND ekf_node node definitions BELOW WERE NOT
-    # DELETED (see return statement) - they are just NOT INCLUDED in the launch
-    # list, reverting when the experiment is over just requires adding them back
-    # to the list (and reverting visual_odometry/odom_topic/wait_imu_to_init
-    # in the rtabmap include). Also full backup: backups/drone_sim_before_vo_experiment_2026-07-08/
+    # Odometry comes solely from rtabmap_launch.launch.py's OWN embedded visual
+    # odometry (visual_odometry:true, below), with the IMU fed to it via imu_topic.
     # ============================================================
-    # Visual odometry (rgbd_odometry) is no longer INSIDE rtabmap_launch.launch.py,
-    # but defined here as a STANDALONE node. Reason: we NEED to DISABLE this
-    # node's TF broadcast (publish_tf) for EKF integration - ekf_node will now
-    # broadcast the odom->base_link TF. The official launch file's
-    # "visual_odometry" mode does not allow controlling this separately
-    # (TF ownership and topic name are tied to the same argument), so this
-    # single node was extracted from the official launch file.
+    # This STANDALONE rgbd_odometry node is DEAD CODE: it is not in the returned
+    # LaunchDescription, so nothing set here has any effect. Kept for reference
+    # only - see the DEAD CODE WARNING below before changing anything here.
     # Vis/MaxFeatures 1000, Vis/MinInliers 18: proven by live CPU measurement
     # (see tasks/lessons.md) - 2000 features saturated rgbd_odometry at 90-124% CPU
     # on a single core, spending ~150ms per frame (~4.5x the 30 FPS budget).
@@ -153,6 +137,11 @@ def generate_launch_description():
         # MaxFeatures 1700 -> 2000, MinInliers 14 -> 15 (2026-07-09, user request):
         # with the camera reverting from 320x240@20fps -> 640x480@30fps, the original
         # (PRE-CPU-fix) MaxFeatures=2000 value was also restored.
+        # NOTE (2026-08-05): the camera is now 640x480@15fps, not @30 - VO was
+        # measured at 58-86ms/frame and could only consume 11.5 of 29 published
+        # frames, so the rate was matched to what it can actually process
+        # (see d455/model.sdf). MaxFeatures stays 2000; the budget came from
+        # the frame rate, not from cutting feature richness.
         # MinInliers 15 -> 13 (2026-07-10, user request): live loop-closure
         # investigation (two full test runs) found ZERO surviving loop closures
         # in either run - most rejections sit at 0 inliers regardless of
@@ -175,33 +164,12 @@ def generate_launch_description():
         arguments=['--Vis/MaxFeatures 2000 --Vis/MinInliers 13'],
     )
 
-    # EKF (robot_localization): fuses rgbd_odometry's raw output (/rtabmap/odom)
-    # with the IMU's angular velocity + linear acceleration. The goal is to
-    # continue estimating from the IMU for a few seconds instead of going completely
-    # blind when visual tracking briefly drops (high covariance/"null" message) -
-    # the exact same "IMU predicts at high rate, slow sensor corrects" pattern
-    # used by real flight controllers (PX4/ArduPilot EKF2).
-    # world_frame=odom (inside ekf.yaml) - EKF only improves the local estimate,
-    # global loop-closure correction is still RTAB-Map's job.
-    # See comments in config/ekf.yaml for details and rationale.
-    ekf_node = Node(
-        package='robot_localization',
-        executable='ekf_node',
-        name='ekf_node',
-        output='screen',
-        parameters=[ekf_config_path, {'use_sim_time': True}],
-        remappings=[
-            ('odometry/filtered', '/rtabmap/odometry_filtered'),
-        ],
-    )
-
     # Including RTAB-Map's official launch file (starts the rtabmap SLAM node
     # + rviz internally) — instead of rewriting them manually, we reuse
     # the existing, maintained launch file.
-    # visual_odometry:false - disables the internal rgbd_odometry
-    # (we now launch it STANDALONE above). odom_topic ensures the
-    # rtabmap SLAM node listens to the EKF's fused output
-    # (/rtabmap/odometry_filtered) instead of the raw VO.
+    # visual_odometry:true - this launch file's OWN embedded rgbd_odometry is
+    # the live odometry source (see line ~394). The standalone rgbd_odometry
+    # Node defined above is dead code and is not launched.
     rtabmap = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(rtabmap_launch_path),
         launch_arguments={
@@ -435,7 +403,6 @@ def generate_launch_description():
         }.items(),
     )
 
-    # EXPERIMENTAL: rgbd_odometry and ekf_node are no longer in the list - embedded
-    # VO (inside the rtabmap include above) is used. To revert to the previous state:
-    # [static_tf, static_tf_imu, rgbd_odometry, ekf_node, rtabmap]
+    # Odometry comes from the embedded VO inside the rtabmap include above, so the
+    # standalone rgbd_odometry Node defined earlier is intentionally not listed here.
     return LaunchDescription([static_tf, static_tf_imu, rtabmap])

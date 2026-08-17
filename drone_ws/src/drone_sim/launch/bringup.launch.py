@@ -13,13 +13,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from world_config import WORLD_NAME  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# SINGLE ENTRY POINT: starts/stops the entire stack (Gazebo + ros_gz bridge + SLAM/EKF/RViz)
+# SINGLE ENTRY POINT: starts/stops the entire stack (Gazebo + ros_gz bridge + SLAM/RViz)
 # from a SINGLE launch file, in the CORRECT ORDER and TOGETHER.
 #
 # WHY: Starting components separately, and especially restarting Gazebo UNDERNEATH
 # a live RViz/SLAM stack resets the simulation clock to zero ("jump back in time").
 # When RViz operates with use_sim_time, it detects this jump backward and resets itself,
-# and this reset sometimes locks up at 100% CPU; furthermore it clears ekf_node/rtabmap
+# and this reset sometimes locks up at 100% CPU; furthermore it clears the rtabmap
 # TF buffers, breaking the odom->base_link connection, resulting in a "two unconnected trees" error.
 # Proof and full diagnosis: tasks/lessons.md (Lesson 3). This file structurally prevents
 # that error by ensuring the "restart" action ALWAYS cycles the entire stack together.
@@ -27,7 +27,7 @@ from world_config import WORLD_NAME  # noqa: E402
 # STARTUP ORDER (the TimerAction delays below enforce this):
 #   1. Gazebo (sim.launch.py)          -> t=0s : world + sensors + /clock
 #   2. ros_gz bridge                   -> t=5s : forwards GZ topics to ROS
-#   3. SLAM/EKF/RViz (slam.launch.py)  -> t=8s : starts while /clock and camera are streaming
+#   3. SLAM/RViz (slam.launch.py)      -> t=8s : starts while /clock and camera are streaming
 # Delays guarantee that sub-components (use_sim_time) start AFTER a healthy /clock
 # and sensor stream are ready.
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ def generate_launch_description():
         ],
     )
 
-    # 3) SLAM stack: static TFs + rgbd_odometry + ekf_node + rtabmap + RViz
+    # 3) SLAM stack: static TFs + rtabmap (with embedded VO) + RViz
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(slam_launch)
     )

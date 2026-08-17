@@ -137,11 +137,10 @@
             </sensor>
             <!-- Models the embedded IMU in the real D455 hardware - instead of
                  relying on x500's OWN IMU (a "borrowed" sensor), an IMU formed
-                 in the SAME link as the camera is used for visual odometry/EKF
+                 in the SAME link as the camera is used for visual odometry
                  (see x500_d455/model.sdf and the new static_tf_imu in
                  slam.launch.py). update_rate=250: EXACTLY the same value as x500's own
-                 imu_sensor - for consistency (so sensor_timeout/frequency settings
-                 in ekf.yaml don't need re-tuning). Although the IMU in the real
+                 imu_sensor - for consistency. Although the IMU in the real
                  D455 is physically offset a few mm from the optical center, in this
                  drone-scale simulation (0.15m mounting height, camera's own 0.007
                  noise margin) there is no practical benefit to modeling that

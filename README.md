@@ -14,7 +14,7 @@ This project was developed iteratively in collaboration with an AI agent to achi
 
 2. **Advanced SLAM & Odometry**
    - Uses **RTAB-Map** for dense 3D mapping and global loop closure detection.
-   - Fuses Visual Odometry (from a simulated Intel RealSense D455) and IMU data using an **Extended Kalman Filter (EKF)** via `robot_localization` for robust state estimation.
+   - Uses RTAB-Map's embedded Visual Odometry (from a simulated Intel RealSense D455), with IMU data fed in for robust state estimation.
 
 3. **Multi-Layered Planning Architecture**
    - **Global Planner**: Uses the **Theta*** algorithm to find shortest, line-of-sight paths through the known octomap grid.
@@ -30,7 +30,7 @@ This project was developed iteratively in collaboration with an AI agent to achi
 
 The project is structured as a standard ROS 2 workspace (`drone_ws`). The core logic resides in `drone_sim`:
 
-- `slam.launch.py`: Initializes the RTAB-Map SLAM backend, visual odometry, and EKF fusion.
+- `slam.launch.py`: Initializes the RTAB-Map SLAM backend and its embedded visual odometry.
 - `sim.launch.py`: Spawns the Gazebo Harmonic world, the x500 drone, and sets up `ros_gz_bridge`.
 - `autonomous.launch.py`: The master launch file that coordinates the bringup of the simulation, SLAM, and all three planners sequentially to avoid time-sync issues.
 - `nbv_planner.py`: Node responsible for frontier extraction and goal generation.
@@ -55,7 +55,7 @@ The project is structured as a standard ROS 2 workspace (`drone_ws`). The core l
    ```
 2. Install dependencies:
    ```bash
-   sudo apt install ros-jazzy-rtabmap-ros ros-jazzy-robot-localization
+   sudo apt install ros-jazzy-rtabmap-ros
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt # (Make sure scipy, numpy, opencv-python are installed)
