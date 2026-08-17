@@ -11,12 +11,11 @@ def generate_launch_description():
     pkg_drone_sim = get_package_share_directory('drone_sim')
 
     # Passed through bringup.launch.py to sim.launch.py's 'gui' argument.
-    # Default false (headless) preserves every existing invocation; run
-    # with 'ros2 launch drone_sim autonomous.launch.py gui:=true' for the
-    # interactive Gazebo client (see sim.launch.py for the VRAM note).
+    # Default true (2026-07-31, user request): the interactive Gazebo client is
+    # wanted by default. Run with 'gui:=false' for a headless session.
     gui_arg = DeclareLaunchArgument(
-        'gui', default_value='false',
-        description='Launch Gazebo with its GUI client instead of headless.')
+        'gui', default_value='true',
+        description='Launch Gazebo with its GUI client. Set false for headless.')
 
     # Include the main bringup launch file (Gazebo, rtabmap, RViz, etc.)
     bringup_launch_path = os.path.join(pkg_drone_sim, 'launch', 'bringup.launch.py')

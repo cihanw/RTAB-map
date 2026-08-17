@@ -46,10 +46,10 @@ def generate_launch_description():
     sim_launch = os.path.join(pkg_drone_sim, 'launch', 'sim.launch.py')
     slam_launch = os.path.join(pkg_drone_sim, 'launch', 'slam.launch.py')
 
-    # Passed through to sim.launch.py's own 'gui' argument (default false).
+    # Passed through to sim.launch.py's own 'gui' argument (default true).
     gui_arg = DeclareLaunchArgument(
-        'gui', default_value='false',
-        description='Launch Gazebo with its GUI client instead of headless.')
+        'gui', default_value='true',
+        description='Launch Gazebo with its GUI client. Set false for headless.')
 
     # 1) Gazebo (world, drone, sensors, /clock broadcast)
     gazebo = IncludeLaunchDescription(
